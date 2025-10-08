@@ -16,12 +16,7 @@ class FluxText2Image:
 
     @torch.inference_mode()
     async def generate(
-        self,
-        prompt: str,
-        steps: int,
-        guidance: float,
-        res: int,
-        seed: Optional[int] = None,
+        self, prompt: str, steps: int, guidance: float, res: int
     ) -> Image.Image:
         out = self.pipe(
             prompt=prompt,
@@ -29,6 +24,5 @@ class FluxText2Image:
             guidance_scale=guidance,
             height=res,
             width=res,
-            seed=seed,
         )
         return out.images[0]

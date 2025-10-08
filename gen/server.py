@@ -1,13 +1,12 @@
 from __future__ import annotations
 
-import asyncio, base64, io, os
+import asyncio, os
 from time import time
 from contextlib import asynccontextmanager
 from typing import Optional
 
 from fastapi import FastAPI, Form, HTTPException
 from fastapi.responses import Response, PlainTextResponse
-from PIL import Image
 from loguru import logger
 
 from gen.settings import Config
@@ -82,15 +81,8 @@ async def generate(
 
     async def _run():
         if mode == "image":
-            try:
-                raw = base64.b64decode(
-                    image_b64, validate=False
-                )  # tolerate URL-safe/non-padded
-            except Exception:
-                # fallback without strict validation
-                raw = base64.b64decode(image_b64 or "")
-            pil = Image.open(io.BytesIO(raw)).convert("RGBA")
-            return await STATE.image_to_ply(pil)
+            assert image_b64 is not None, "Invalid image input"
+            return await STATE.image_to_ply(image_b64)
         else:
             assert prompt is not None and prompt.strip(), "Empty text prompt"
             return await STATE.text_to_ply(prompt.strip())

@@ -1,9 +1,12 @@
 from __future__ import annotations
+import base64
+import io
 from typing import Tuple, Optional, List
 from loguru import logger
 import asyncio, time, random
 import numpy as np
 import torch
+from PIL import Image
 
 from gen.settings import Config
 from gen.pipelines.t2i_flux import FluxText2Image
@@ -134,23 +137,15 @@ class MinerState:
 
     async def _gen_one_image(self, prompt: str, params: dict):
         seed = params.get("seed")
-        # Prefer explicit seed param; fallback to global seeding
-        try:
-            img = await self.t2i.generate(
-                prompt,
-                steps=params["steps"],
-                guidance=params["guidance"],
-                res=params["res"],
-                seed=seed,
-            )
-        except TypeError:
-            _seed_everywhere(seed)
-            img = await self.t2i.generate(
-                prompt,
-                steps=params["steps"],
-                guidance=params["guidance"],
-                res=params["res"],
-            )
+        _seed_everywhere(seed)
+
+        img = await self.t2i.generate(
+            prompt,
+            steps=params["steps"],
+            guidance=params["guidance"],
+            res=params["res"],
+        )
+
         return img, params
 
     async def _trellis_one(self, pil_image, params: dict):
@@ -228,8 +223,17 @@ class MinerState:
         final_pass = best_score >= self.cfg.vld_threshold
         return (best_ply if final_pass else b""), max(0.0, best_score)
 
-    async def image_to_ply(self, pil_image) -> Tuple[bytes, float]:
+    async def image_to_ply(self, image_b64) -> Tuple[bytes, float]:
         start_ts = time.time()
+
+        try:
+            raw = base64.b64decode(
+                image_b64, validate=False
+            )  # tolerate URL-safe/non-padded
+        except Exception:
+            # fallback without strict validation
+            raw = base64.b64decode(image_b64 or "")
+        pil_image = Image.open(io.BytesIO(raw)).convert("RGBA")
 
         # 1) BG removal (once)
         fg, _ = self.bg_remover.remove(pil_image)
@@ -246,7 +250,7 @@ class MinerState:
             ply_bytes, _ = await self._trellis_one(fg, tparams)
 
             # 3) Validate
-            score, passed, _ = await self.validator.validate_image(pil_image, ply_bytes)
+            score, passed, _ = await self.validator.validate_image(image_b64, ply_bytes)
             logger.info(
                 f"[image] TRELLIS{tparams} -> score={score:.4f}, passed={passed}"
             )
