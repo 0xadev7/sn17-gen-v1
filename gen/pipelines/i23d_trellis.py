@@ -46,7 +46,7 @@ class TrellisImageTo3D:
         gs = outputs["gaussian"][0]  # Trellis returns first result
 
         # Control size: prune/densify to fit max points and approx target MB
-        gs.prune_to_max_points(self.max_gs)
+        # gs.prune_to_max_points(self.max_gs)
 
         # Export to PLY in-memory
         buf = io.BytesIO()
