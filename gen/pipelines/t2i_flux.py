@@ -16,7 +16,7 @@ class FluxText2Image:
         self.pipe = FluxPipeline.from_pretrained(
             "black-forest-labs/FLUX.1-schnell",
             torch_dtype=torch.bfloat16,
-            device_map="auto",
+            device_map="balanced",
             text_encoder=text_encoder,
             tokenizer=tokenizer,
         )
