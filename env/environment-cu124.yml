@@ -2,7 +2,6 @@ name: sn17-miner-v1
 channels: [pytorch, nvidia, conda-forge]
 dependencies:
   - python=3.11
-  - cudatoolkit=12.4
   - pytorch::pytorch=2.4.1
   - pytorch::torchvision=0.19.1
   - pytorch::torchaudio=2.4.1

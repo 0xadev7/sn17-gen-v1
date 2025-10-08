@@ -1,5 +1,5 @@
 # Base server
-conda env create -f envs/environment-cu124.yml
+conda env create -f env/environment-cu124.yml
 conda activate sn17-miner-v1
 
 # Trellis
