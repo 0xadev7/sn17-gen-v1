@@ -37,3 +37,4 @@ dependencies:
       - python-multipart
       - python-dotenv
       - hf_transfer
+      - kornia
