@@ -1,24 +1,68 @@
 from __future__ import annotations
-import asyncio, base64, io
+
+import asyncio, base64, io, os
 from time import time
-from fastapi import FastAPI, Form
-from fastapi.responses import Response, StreamingResponse
+from contextlib import asynccontextmanager
+from typing import Optional
+
+from fastapi import FastAPI, Form, HTTPException
+from fastapi.responses import Response, PlainTextResponse
 from PIL import Image
 from loguru import logger
 
 from miner.settings import Config
 from miner.state import MinerState
 
-app = FastAPI()
+
 CFG = Config()
-STATE: MinerState | None = None
+STATE: Optional[MinerState] = None
 
 
-@app.on_event("startup")
-def startup():
+@asynccontextmanager
+async def lifespan(app: FastAPI):
+    """
+    FastAPI-recommended startup/shutdown handler.
+    Initializes MinerState once; if it fails, we log and keep app up with 503s.
+    """
     global STATE
-    STATE = MinerState(CFG)
-    logger.info(f"Server up. Port={CFG.port}, GPU={CFG.gpu_id}")
+    try:
+        # Optional: set CUDA device if your Config has gpu_id
+        try:
+            import torch  # local import so CPU-only envs don't fail import at import-time
+
+            if torch.cuda.is_available():
+                torch.cuda.set_device(CFG.gpu_id)
+        except Exception as e:
+            logger.warning(f"[lifespan] CUDA device selection skipped: {e}")
+
+        STATE = MinerState(CFG)
+        logger.info(f"Server up. Port={CFG.port}, GPU={CFG.gpu_id}")
+    except Exception as e:
+        # Do NOT crash app; let /health expose failure
+        STATE = None
+        logger.exception(f"[lifespan] MinerState init failed: {e}")
+
+    yield
+
+    # Graceful shutdown (if you keep any pools/clients, close them here)
+    # e.g., await STATE.aclose() if implemented
+
+
+app = FastAPI(lifespan=lifespan)
+
+
+def _require_mode(prompt: Optional[str], image_b64: Optional[str]) -> str:
+    if prompt and image_b64:
+        raise HTTPException(400, "Provide either 'prompt' or 'image_b64', not both.")
+    if not prompt and not image_b64:
+        raise HTTPException(400, "Provide one of 'prompt' or 'image_b64'.")
+    return "image" if image_b64 else "text"
+
+
+@app.get("/health", response_class=PlainTextResponse)
+async def health():
+    # Report whether models loaded
+    return "ok" if STATE is not None else "degraded: miner not initialized"
 
 
 @app.post("/generate")
@@ -27,29 +71,61 @@ async def generate(
     image_b64: str | None = Form(None),
 ):
     """
-    Returns binary PLY (Gaussian Splat). MUST return within 30s.
+    Returns binary PLY (Gaussian Splat). MUST return within CFG.timeout_s.
     Returns empty bytes if self-validation fails or timeout occurs.
     """
-    assert STATE is not None
+    if STATE is None:
+        raise HTTPException(503, "Miner not initialized (see logs for details).")
+
+    mode = _require_mode(prompt, image_b64)
     t0 = time()
+
+    async def _run():
+        if mode == "image":
+            try:
+                raw = base64.b64decode(
+                    image_b64, validate=False
+                )  # tolerate URL-safe/non-padded
+            except Exception:
+                # fallback without strict validation
+                raw = base64.b64decode(image_b64 or "")
+            pil = Image.open(io.BytesIO(raw)).convert("RGBA")
+            return await STATE.image_to_ply(pil)
+        else:
+            assert prompt is not None and prompt.strip(), "Empty text prompt"
+            return await STATE.text_to_ply(prompt.strip())
+
+    # Fallback to 30s if your Config doesn’t define timeout_s
+    timeout_s = getattr(CFG, "timeout_s", 30.0)
+
     try:
-
-        async def _run():
-            if image_b64:
-                pil = Image.open(io.BytesIO(base64.b64decode(image_b64)))
-                return await STATE.image_to_ply(pil)
-            else:
-                assert prompt is not None and prompt.strip()
-                return await STATE.text_to_ply(prompt.strip())
-
-        ply_bytes, score = await asyncio.wait_for(_run(), timeout=CFG.timeout_s)
-
+        ply_bytes, score = await asyncio.wait_for(_run(), timeout=timeout_s)
         elapsed = time() - t0
         mb = len(ply_bytes) / 1e6
-
-        logger.info(f"[generate] score={score:.3f} ply={mb:.1f}MB total={elapsed:.2f}s")
+        logger.info(
+            f"[/generate:{mode}] score={score:.3f} ply={mb:.1f}MB total={elapsed:.2f}s"
+        )
         return Response(ply_bytes, media_type="application/octet-stream")
-
     except asyncio.TimeoutError:
-        logger.warning("[generate] timed out at 30s; returning empty bytes")
+        logger.warning(
+            f"[/generate:{mode}] timed out at {timeout_s:.0f}s; returning empty bytes"
+        )
         return Response(b"", media_type="application/octet-stream")
+    except Exception as e:
+        # Do not crash; return empty to respect caller contract
+        logger.exception(f"[/generate:{mode}] error: {e}")
+        return Response(b"", media_type="application/octet-stream")
+
+
+if __name__ == "__main__":
+    import os
+    import uvicorn
+
+    # Prefer env vars, fall back to Config()
+    host = os.getenv("HOST", "0.0.0.0")
+    try:
+        port = int(os.getenv("PORT", str(CFG.port)))
+    except Exception:
+        port = CFG.port
+
+    uvicorn.run(app, host=host, port=port, log_level="info")

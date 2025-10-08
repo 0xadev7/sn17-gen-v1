@@ -1,21 +1,23 @@
-name: sn17-miner-v1
-channels: [conda-forge]
-channel_priority: strict
+channels:
+  - pytorch
+  - nvidia
+  - conda-forge
+
 dependencies:
   - python=3.11
-  - git
-  - ffmpeg
+  - pytorch::pytorch=2.4.0
+  - pytorch::torchvision=0.19.0
+  - pytorch::torchaudio=2.4.0
+  - pytorch::pytorch-cuda=12.4
   - pip
+  - ffmpeg
+  - git
   - pip:
-      - torch==2.4.1+cu124
-      - torchvision==0.19.1+cu124
-      - torchaudio==2.4.1+cu124
-      - --extra-index-url https://download.pytorch.org/whl/cu124
+      - xformers==0.0.27.post2
       - diffusers>=0.30.0
       - transformers>=4.43
-      - open-clip-torch>=2.24.0
       - accelerate>=0.33.0
-      - xformers>=0.0.27
+      - open-clip-torch>=2.24.0
       - einops
       - opencv-python-headless
       - imageio
@@ -29,3 +31,5 @@ dependencies:
       - simple-aesthetics-predictor
       - httpx
       - python-multipart
+      - python-dotenv
+      - uvicorn
