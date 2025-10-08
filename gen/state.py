@@ -75,14 +75,11 @@ class MinerState:
         tries = []
         for i in range(self.t2i_max_tries):
             # Light variation: +/- 10% steps, guidance jitter in [ -0.5, +0.5 ]
-            steps = max(
-                8,
-                int(
-                    round(
-                        base["steps"]
-                        * (1.0 + (i - 0.5) * 0.15 / max(1, self.t2i_max_tries - 1))
-                    )
-                ),
+            steps = int(
+                round(
+                    base["steps"]
+                    * (1.0 + (i - 0.5) * 0.15 / max(1, self.t2i_max_tries - 1))
+                )
             )
             guidance = float(
                 base["guidance"] + (i - 0.5) * 1.0 / max(1, self.t2i_max_tries - 1)
@@ -105,7 +102,7 @@ class MinerState:
         tries = []
         for i in range(self.trellis_max_tries):
             struct_steps = max(
-                4,
+                8,
                 int(
                     round(
                         self.cfg.trellis_struct_steps
@@ -114,7 +111,7 @@ class MinerState:
                 ),
             )
             slat_steps = max(
-                4,
+                8,
                 int(
                     round(
                         self.cfg.trellis_slat_steps

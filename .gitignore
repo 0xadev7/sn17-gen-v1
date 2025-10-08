@@ -2,3 +2,6 @@
 
 __pycache__/
 *.pyc
+
+*.ply
+test-run.sh
