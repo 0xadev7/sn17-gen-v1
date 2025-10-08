@@ -40,7 +40,8 @@ class Pipeline:
         for k, v in args['models'].items():
             try:
                 _models[k] = models.from_pretrained(f"{path}/{v}")
-            except:
+            except Exception as e:
+                print(e)
                 _models[k] = models.from_pretrained(v)
 
         new_pipeline = Pipeline(_models)
