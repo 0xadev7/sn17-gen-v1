@@ -16,8 +16,8 @@ dependencies:
   - git
   - pip:
       - xformers==0.0.27.post2
-      - diffusers>=0.30.0
-      - transformers==4.44.2
+      - diffusers==
+      - transformers
       - sentencepiece
       - accelerate>=0.33.0
       - safetensors>=0.4.3

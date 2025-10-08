@@ -46,7 +46,6 @@ def from_pretrained(path: str, **kwargs):
               NOTE: config file and model file should take the name f'{path}.json' and f'{path}.safetensors' respectively.
         **kwargs: Additional arguments for the model constructor.
     """
-    print("DEBUG: ", path)
 
     import os
     import json
@@ -61,7 +60,6 @@ def from_pretrained(path: str, **kwargs):
         path_parts = path.split('/')
         repo_id = f'{path_parts[0]}/{path_parts[1]}'
         model_name = '/'.join(path_parts[2:])
-        print('DDD', model_name, repo_id)
         config_file = hf_hub_download(repo_id, f"{model_name}.json")
         model_file = hf_hub_download(repo_id, f"{model_name}.safetensors")
 
