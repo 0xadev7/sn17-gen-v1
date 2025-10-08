@@ -10,6 +10,7 @@ class FluxText2Image:
             "black-forest-labs/FLUX.1-schnell",
             torch_dtype=torch.bfloat16,
         )
+        self.pipe.enable_model_cpu_offload()
         self.pipe.to(device)
         self.device = device
 
