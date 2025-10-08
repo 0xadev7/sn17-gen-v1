@@ -18,7 +18,7 @@ class TrellisImageTo3D:
         target_mb: int,
     ):
         self.pipe = TrellisImageTo3DPipeline.from_pretrained(
-            "microsoft/TRELLIS-text-large"
+            "microsoft/TRELLIS-image-large"
         )
         self.pipe.cuda()
 
