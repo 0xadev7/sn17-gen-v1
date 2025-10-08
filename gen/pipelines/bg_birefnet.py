@@ -7,13 +7,11 @@ from transformers import AutoModelForImageSegmentation
 
 
 class BiRefNetRemover:
-    def __init__(
-        self, model_id: str = "ZhengPeng7/BiRefNet", device: str | None = None
-    ):
+    def __init__(self, device: str | None = None):
         self.device = device or ("cuda" if torch.cuda.is_available() else "cpu")
         self.model = (
             AutoModelForImageSegmentation.from_pretrained(
-                model_id, trust_remote_code=True
+                "ZhengPeng7/BiRefNet", trust_remote_code=True
             )
             .to(self.device)
             .eval()
