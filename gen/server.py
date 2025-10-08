@@ -10,8 +10,8 @@ from fastapi.responses import Response, PlainTextResponse
 from PIL import Image
 from loguru import logger
 
-from miner.settings import Config
-from miner.state import MinerState
+from gen.settings import Config
+from gen.state import MinerState
 
 
 CFG = Config()

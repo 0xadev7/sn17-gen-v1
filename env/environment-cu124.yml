@@ -1,3 +1,5 @@
+name: sn17-gen-v1
+
 channels:
   - pytorch
   - nvidia

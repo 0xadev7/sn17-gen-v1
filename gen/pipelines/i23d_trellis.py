@@ -3,7 +3,7 @@ import io, torch, os
 from typing import List, Tuple
 from PIL import Image
 
-from miner.lib.trellis.pipelines import TrellisImageTo3DPipeline
+from gen.lib.trellis.pipelines import TrellisImageTo3DPipeline
 
 
 class TrellisImageTo3D:

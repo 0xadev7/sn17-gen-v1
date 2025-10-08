@@ -3,11 +3,11 @@ from typing import Tuple
 from loguru import logger
 import torch
 
-from miner.settings import Config
-from miner.pipelines.t2i_flux import FluxText2Image
-from miner.pipelines.bg_birefnet import BiRefNetMatte
-from miner.pipelines.i23d_trellis import TrellisImageTo3D
-from miner.validators.external_validator import ExternalValidator
+from gen.settings import Config
+from gen.pipelines.t2i_flux import FluxText2Image
+from gen.pipelines.bg_birefnet import BiRefNetMatte
+from gen.pipelines.i23d_trellis import TrellisImageTo3D
+from gen.validators.external_validator import ExternalValidator
 
 
 class MinerState:
