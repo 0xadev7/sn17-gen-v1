@@ -1,6 +1,8 @@
 from __future__ import annotations
-from typing import Tuple
+from typing import Tuple, Optional, List
 from loguru import logger
+import asyncio, time, random
+import numpy as np
 import torch
 
 from gen.settings import Config
@@ -8,6 +10,13 @@ from gen.pipelines.t2i_flux import FluxText2Image
 from gen.pipelines.bg_birefnet import BiRefNetRemover
 from gen.pipelines.i23d_trellis import TrellisImageTo3D
 from gen.validators.external_validator import ExternalValidator
+
+
+def _seed_everywhere(seed):
+    random.seed(seed)
+    np.random.seed(seed & 0xFFFFFFFF)
+    torch.manual_seed(seed)
+    torch.cuda.manual_seed_all(seed)
 
 
 class MinerState:
@@ -34,38 +43,222 @@ class MinerState:
             cfg.validator_url_txt, cfg.validator_url_img, cfg.vld_threshold
         )
 
+        # Retry / budget knobs with sensible defaults if absent on cfg
+        self.t2i_max_tries: int = getattr(cfg, "t2i_max_tries", 3)
+        self.trellis_max_tries: int = getattr(cfg, "trellis_max_tries", 2)
+        self.early_stop_score: float = getattr(
+            cfg, "early_stop_score", max(0.0, cfg.vld_threshold)
+        )
+        self.time_budget_s: Optional[float] = getattr(
+            cfg, "time_budget_s", None
+        )  # None = no budget
+
         logger.info("Models loaded and warmed-up.")
 
-    async def text_to_ply(self, prompt: str) -> Tuple[bytes, float]:
-        # 1) Text→image (fast)
-        image = await self.t2i.generate(
-            prompt,
+    # ---------------------------
+    # Internal helpers
+    # ---------------------------
+
+    def _t2i_param_sweep(self) -> List[dict]:
+        """
+        Produce a small sweep of params for T2I retries.
+        Keep it tight to preserve style but enable escape from local minima.
+        """
+        base = dict(
             steps=self.cfg.t2i_steps,
             guidance=self.cfg.t2i_guidance,
             res=self.cfg.t2i_res,
         )
+        tries = []
+        for i in range(self.t2i_max_tries):
+            # Light variation: +/- 10% steps, guidance jitter in [ -0.5, +0.5 ]
+            steps = max(
+                8,
+                int(
+                    round(
+                        base["steps"]
+                        * (1.0 + (i - 0.5) * 0.15 / max(1, self.t2i_max_tries - 1))
+                    )
+                ),
+            )
+            guidance = float(
+                base["guidance"] + (i - 0.5) * 1.0 / max(1, self.t2i_max_tries - 1)
+            )
+            tries.append(
+                {
+                    "steps": steps,
+                    "guidance": max(1.0, guidance),
+                    "res": base["res"],
+                    "seed": random.randint(0, 2**31 - 1),
+                }
+            )
+        return tries
 
-        # 2) Background removal
-        fg, _ = self.bg_remover.remove(image)
+    def _trellis_param_sweep(self) -> List[dict]:
+        """
+        Produce a small sweep of Trellis params for retries.
+        Keep changes mild to avoid big latency swings.
+        """
+        tries = []
+        for i in range(self.trellis_max_tries):
+            struct_steps = max(
+                4,
+                int(
+                    round(
+                        self.cfg.trellis_struct_steps
+                        * (1.0 + (i - 0.5) * 0.2 / max(1, self.trellis_max_tries - 1))
+                    )
+                ),
+            )
+            slat_steps = max(
+                4,
+                int(
+                    round(
+                        self.cfg.trellis_slat_steps
+                        * (1.0 + (0.5 - i) * 0.2 / max(1, self.trellis_max_tries - 1))
+                    )
+                ),
+            )
+            cfg_struct = max(0.5, float(self.cfg.trellis_cfg_struct + (i - 0.5) * 0.4))
+            cfg_slat = max(0.5, float(self.cfg.trellis_cfg_slat + (0.5 - i) * 0.4))
+            tries.append(
+                {
+                    "struct_steps": struct_steps,
+                    "slat_steps": slat_steps,
+                    "cfg_struct": cfg_struct,
+                    "cfg_slat": cfg_slat,
+                    "seed": random.randint(0, 2**31 - 1),
+                }
+            )
+        return tries
 
-        # 4) TRELLIS image-to-3D
-        ply_bytes = await self.trellis_img.infer_to_ply(fg)
+    async def _gen_one_image(self, prompt: str, params: dict):
+        seed = params.get("seed")
+        # Prefer explicit seed param; fallback to global seeding
+        try:
+            img = await self.t2i.generate(
+                prompt,
+                steps=params["steps"],
+                guidance=params["guidance"],
+                res=params["res"],
+                seed=seed,
+            )
+        except TypeError:
+            _seed_everywhere(seed)
+            img = await self.t2i.generate(
+                prompt,
+                steps=params["steps"],
+                guidance=params["guidance"],
+                res=params["res"],
+            )
+        return img, params
 
-        # 5) Validation
-        score, passed, _ = await self.validator.validate_text(prompt, ply_bytes)
-        logger.info(f"External validator (text): score={score}, passed={passed}")
+    async def _trellis_one(self, pil_image, params: dict):
+        seed = params.get("seed")
+        try:
+            ply_bytes = await self.trellis_img.infer_to_ply(
+                pil_image,
+                struct_steps=params["struct_steps"],
+                slat_steps=params["slat_steps"],
+                cfg_struct=params["cfg_struct"],
+                cfg_slat=params["cfg_slat"],
+                seed=seed,
+            )
+        except TypeError:
+            _seed_everywhere(seed)
+            # Fallback: use constructor defaults (we already baked variations in init)
+            ply_bytes = await self.trellis_img.infer_to_ply(pil_image)
+        return ply_bytes, params
 
-        return ply_bytes if passed else b"", score
+    def _within_budget(self, start_ts: float) -> bool:
+        if self.time_budget_s is None:
+            return True
+        return (time.time() - start_ts) < self.time_budget_s
+
+    # ---------------------------
+    # Public APIs with retries
+    # ---------------------------
+
+    async def text_to_ply(self, prompt: str) -> Tuple[bytes, float]:
+        start_ts = time.time()
+
+        # 1) Generate multiple images (fan-out)
+        t2i_params = self._t2i_param_sweep()
+        image_tasks = [self._gen_one_image(prompt, p) for p in t2i_params]
+
+        # If you need stricter SLA, you can limit concurrency here.
+        t2i_results: List[Tuple] = await asyncio.gather(*image_tasks)
+
+        best_score = -1.0
+        best_ply: bytes = b""
+
+        for img, iparams in t2i_results:
+            if not self._within_budget(start_ts):
+                logger.warning("Budget exhausted after T2I; stopping.")
+                break
+
+            # 2) Background removal
+            fg, _ = self.bg_remover.remove(img)
+
+            # 3) Multiple Trellis tries (usually sequential to avoid GPU thrash)
+            for tparams in self._trellis_param_sweep():
+                if not self._within_budget(start_ts):
+                    logger.warning("Budget exhausted mid-Trellis; stopping.")
+                    break
+
+                ply_bytes, _ = await self._trellis_one(fg, tparams)
+
+                # 4) Validate
+                score, passed, _ = await self.validator.validate_text(prompt, ply_bytes)
+                logger.info(
+                    f"[text] T2I{iparams}|TRELLIS{tparams} -> score={score:.4f}, passed={passed}"
+                )
+
+                if score > best_score:
+                    best_score, best_ply = score, ply_bytes
+
+                # Early stop if we’ve cleared a high bar
+                if score >= self.early_stop_score:
+                    logger.info(
+                        f"[text] Early-stop: score {score:.4f} >= {self.early_stop_score:.4f}"
+                    )
+                    return (ply_bytes if passed else b""), score
+
+        # Return best seen (respect validator threshold)
+        final_pass = best_score >= self.cfg.vld_threshold
+        return (best_ply if final_pass else b""), max(0.0, best_score)
 
     async def image_to_ply(self, pil_image) -> Tuple[bytes, float]:
-        # 1) BG removal
+        start_ts = time.time()
+
+        # 1) BG removal (once)
         fg, _ = self.bg_remover.remove(pil_image)
 
-        # 2) TRELLIS image-to-3D
-        ply_bytes = await self.trellis_img.infer_to_ply(fg)
+        best_score = -1.0
+        best_ply: bytes = b""
 
-        # 3) Validation
-        score, passed, _ = await self.validator.validate_image(pil_image, ply_bytes)
-        logger.info(f"External validator (image): score={score}, passed={passed}")
+        # 2) Multiple Trellis tries
+        for tparams in self._trellis_param_sweep():
+            if not self._within_budget(start_ts):
+                logger.warning("Budget exhausted mid-Trellis(image); stopping.")
+                break
 
-        return ply_bytes if passed else b"", score
+            ply_bytes, _ = await self._trellis_one(fg, tparams)
+
+            # 3) Validate
+            score, passed, _ = await self.validator.validate_image(pil_image, ply_bytes)
+            logger.info(
+                f"[image] TRELLIS{tparams} -> score={score:.4f}, passed={passed}"
+            )
+
+            if score > best_score:
+                best_score, best_ply = score, ply_bytes
+
+            if score >= self.early_stop_score:
+                logger.info(
+                    f"[image] Early-stop: score {score:.4f} >= {self.early_stop_score:.4f}"
+                )
+                return (ply_bytes if passed else b""), score
+
+        final_pass = best_score >= self.cfg.vld_threshold
+        return (best_ply if final_pass else b""), max(0.0, best_score)

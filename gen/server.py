@@ -65,7 +65,7 @@ async def health():
     return "ok" if STATE is not None else "degraded: miner not initialized"
 
 
-@app.post("/generate")
+@app.post("/generate/")
 async def generate(
     prompt: str | None = Form(None),
     image_b64: str | None = Form(None),

@@ -21,10 +21,14 @@ class Config:
     )
     vld_threshold: float = float(os.getenv("VALIDATION_THRESHOLD", 0.7))
 
+    early_stop_score: float = float(os.getenv("EARLY_STOP_SCORE", 0.82))
+    time_budget_s: float | None = float(os.getenv("TIME_BUDGET_S", 22))
+
     # Text-to-2D parameters
     t2i_steps: int = int(os.getenv("T2I_STEPS", 2))
     t2i_guidance: float = float(os.getenv("T2I_GUIDANCE", 3.5))
     t2i_res: int = int(os.getenv("T2I_RES", 704))
+    t2i_max_tries: int = int(os.getenv("T2I_MAX_TRIES", 3))
 
     # Trellis parameters
     trellis_struct_steps: int = int(os.getenv("TRELLIS_STRUCT_STEPS", 6))
@@ -33,3 +37,4 @@ class Config:
     trellis_cfg_slat: float = float(os.getenv("TRELLIS_CFG_SLAT", 3.0))
     trellis_max_gaussians: int = int(os.getenv("TRELLIS_MAX_GS", 600_000))
     trellis_target_mb: int = int(os.getenv("TRELLIS_TARGET_MB", 40))
+    trellis_max_tries: int = int(os.getenv("TRELLIS_MAX_TRIES", 2))

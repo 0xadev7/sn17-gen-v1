@@ -1,6 +1,6 @@
 from __future__ import annotations
 import io, torch, os
-from typing import List, Tuple
+from typing import List, Optional, Tuple
 from PIL import Image
 
 from gen.lib.trellis.pipelines import TrellisImageTo3DPipeline
@@ -30,23 +30,32 @@ class TrellisImageTo3D:
         self.target_mb = target_mb
 
     @torch.inference_mode()
-    async def infer_to_ply(self, image: Image.Image) -> bytes:
+    async def infer_to_ply(
+        self,
+        image: Image.Image,
+        struct_steps=None,
+        slat_steps=None,
+        cfg_struct=None,
+        cfg_slat=None,
+        seed=None,
+    ) -> bytes:
         outputs = self.pipe.run(
             image,
-            seed=1,
+            seed=seed if seed is not None else 1,
             sparse_structure_sampler_params={
-                "steps": self.steps_struct,
-                "cfg_strength": self.cfg_struct,
+                "steps": (
+                    struct_steps if struct_steps is not None else self.steps_struct
+                ),
+                "cfg_strength": (
+                    cfg_struct if cfg_struct is not None else self.cfg_struct
+                ),
             },
             slat_sampler_params={
-                "steps": self.steps_slat,
-                "cfg_strength": self.cfg_slat,
+                "steps": slat_steps if slat_steps is not None else self.steps_slat,
+                "cfg_strength": cfg_slat if cfg_slat is not None else self.cfg_slat,
             },
         )
-        gs = outputs["gaussian"][0]  # Trellis returns first result
-
-        # Control size: prune/densify to fit max points and approx target MB
-        # gs.prune_to_max_points(self.max_gs)
+        gs = outputs["gaussian"][0]
 
         # Export to PLY in-memory
         buf = io.BytesIO()

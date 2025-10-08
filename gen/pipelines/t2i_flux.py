@@ -1,4 +1,5 @@
 from __future__ import annotations
+from typing import Optional
 import torch
 from diffusers import FluxPipeline
 from PIL import Image
@@ -15,7 +16,12 @@ class FluxText2Image:
 
     @torch.inference_mode()
     async def generate(
-        self, prompt: str, steps: int, guidance: float, res: int
+        self,
+        prompt: str,
+        steps: int,
+        guidance: float,
+        res: int,
+        seed: Optional[int] = None,
     ) -> Image.Image:
         out = self.pipe(
             prompt=prompt,
@@ -23,5 +29,6 @@ class FluxText2Image:
             guidance_scale=guidance,
             height=res,
             width=res,
+            seed=seed,
         )
         return out.images[0]
