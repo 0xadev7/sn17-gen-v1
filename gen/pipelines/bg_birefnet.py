@@ -1,35 +1,49 @@
-from __future__ import annotations
-import torch
-from PIL import Image
+from typing import Tuple
 import numpy as np
-from transformers import AutoModelForImageSegmentation, AutoImageProcessor
+from PIL import Image
+import torch
+from torchvision import transforms
+from transformers import AutoModelForImageSegmentation
 
 
-class BiRefNetMatte:
-    def __init__(self, device: torch.device):
-        self.processor = AutoImageProcessor.from_pretrained(
-            "ZhengPeng7/BiRefNet", trust_remote_code=True
-        )
+class BiRefNetRemover:
+    def __init__(
+        self, model_id: str = "ZhengPeng7/BiRefNet", device: str | None = None
+    ):
+        self.device = device or ("cuda" if torch.cuda.is_available() else "cpu")
         self.model = (
             AutoModelForImageSegmentation.from_pretrained(
-                "ZhengPeng7/BiRefNet", trust_remote_code=True
+                model_id, trust_remote_code=True
             )
-            .to(device)
+            .to(self.device)
             .eval()
         )
-        self.device = device
+        if self.device == "cuda":
+            self.model.half()
+            torch.set_float32_matmul_precision("high")
+
+        # Use 1024 for general; dynamic tolerates any size, but we keep a stable load.
+        self.image_size = (1024, 1024)
+        self.tfm = transforms.Compose(
+            [
+                transforms.Resize(self.image_size),
+                transforms.ToTensor(),
+                transforms.Normalize([0.485, 0.456, 0.406], [0.229, 0.224, 0.225]),
+            ]
+        )
 
     @torch.inference_mode()
-    async def remove_bg(self, image: Image.Image) -> Image.Image:
-        # outputs single-channel matting mask
-        inputs = self.processor(images=image, return_tensors="pt").to(
-            self.device, dtype=torch.float16
-        )
-        logits = self.model(**inputs).logits  # (1,1,H,W) per the trust_remote_code
-        mask = torch.sigmoid(logits.float())[0, 0].cpu().numpy()
-        mask = np.clip(mask, 0, 1)
+    def remove(self, img: Image.Image) -> Tuple[Image.Image, np.ndarray]:
+        rgb = img.convert("RGB")
+        x = self.tfm(rgb).unsqueeze(0).to(self.device)
+        if self.device == "cuda":
+            x = x.half()
 
-        im = np.array(image.convert("RGBA"), dtype=np.float32) / 255.0
-        im[..., 3] = mask  # put matte in alpha
-        im = (im * 255).astype(np.uint8)
-        return Image.fromarray(im, mode="RGBA")
+        pred = self.model(x)[-1].sigmoid().float().cpu()[0, 0]  # HxW
+        mask_pil = transforms.functional.resize(transforms.ToPILImage()(pred), rgb.size)
+        # 0–255 alpha
+        out = rgb.copy()
+        out.putalpha(mask_pil)
+
+        alpha = np.array(mask_pil, dtype=np.float32) / 255.0  # HxW in [0,1]
+        return out, alpha

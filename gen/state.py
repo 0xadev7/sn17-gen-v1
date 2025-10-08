@@ -5,7 +5,7 @@ import torch
 
 from gen.settings import Config
 from gen.pipelines.t2i_flux import FluxText2Image
-from gen.pipelines.bg_birefnet import BiRefNetMatte
+from gen.pipelines.bg_birefnet import BiRefNetRemover
 from gen.pipelines.i23d_trellis import TrellisImageTo3D
 from gen.validators.external_validator import ExternalValidator
 
@@ -18,7 +18,7 @@ class MinerState:
 
         # Pipelines
         self.t2i = FluxText2Image(self.device)
-        self.matte = BiRefNetMatte(self.device)
+        self.bg_remover = BiRefNetRemover(self.device)
         self.trellis_img = TrellisImageTo3D(
             self.device,
             cfg.trellis_struct_steps,
@@ -46,7 +46,7 @@ class MinerState:
         )
 
         # 2) Background removal
-        fg = await self.matte.remove_bg(image)
+        fg, _ = self.bg_remover.remove(image)
 
         # 4) TRELLIS image-to-3D
         ply_bytes = await self.trellis_img.infer_to_ply(fg)
@@ -59,7 +59,7 @@ class MinerState:
 
     async def image_to_ply(self, pil_image) -> Tuple[bytes, float]:
         # 1) BG removal
-        fg = await self.matte.remove_bg(pil_image)
+        fg, _ = self.bg_remover.remove(pil_image)
 
         # 2) TRELLIS image-to-3D
         ply_bytes = await self.trellis_img.infer_to_ply(fg)
