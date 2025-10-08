@@ -32,4 +32,3 @@ dependencies:
       - httpx
       - python-multipart
       - python-dotenv
-      - uvicorn
