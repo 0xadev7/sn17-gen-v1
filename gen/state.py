@@ -81,7 +81,7 @@ class MinerState:
                     }
                 )
             else:
-                frac = 0.5  # 50% jitter for steps
+                frac = 0.1  # 10% jitter for steps
                 delta_steps = int(
                     round(base_steps * frac * ((i) / (self.t2i_max_tries - 1)))
                 )
@@ -187,10 +187,9 @@ class MinerState:
                 cfg_slat=params["cfg_slat"],
                 seed=seed,
             )
-        except TypeError:
-            _seed_everywhere(seed)
-            # Fallback: use constructor defaults (we already baked variations in init)
-            ply_bytes = await self.trellis_img.infer_to_ply(pil_image)
+        except Exception as e:
+            logger.error("Trellis error: ", e)
+            ply_bytes = b""
         return ply_bytes, params
 
     def _within_budget(self, start_ts: float) -> bool:
@@ -230,6 +229,9 @@ class MinerState:
                     break
 
                 ply_bytes, _ = await self._trellis_one(fg, tparams)
+
+                if len(ply_bytes) == 0:
+                    continue
 
                 # 4) Validate
                 score, passed, _ = await self.validator.validate_text(prompt, ply_bytes)
@@ -276,6 +278,9 @@ class MinerState:
                 break
 
             ply_bytes, _ = await self._trellis_one(fg, tparams)
+
+            if len(ply_bytes) == 0:
+                continue
 
             # 3) Validate
             score, passed, _ = await self.validator.validate_image(image_b64, ply_bytes)
