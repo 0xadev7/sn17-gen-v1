@@ -15,7 +15,7 @@ class FluxText2Image:
         self.device = device
 
     def tune_prompt(self, prompt: str) -> str:
-        return prompt + ", neutral background, high quality object"
+        return prompt + ", neutral background"
 
     @torch.inference_mode()
     async def generate(

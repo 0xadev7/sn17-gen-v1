@@ -1,7 +1,7 @@
 from __future__ import annotations
 import base64
 import io
-from typing import Tuple, Optional, List
+from typing import Dict, Tuple, Optional, List
 from loguru import logger
 import asyncio, time, random
 import numpy as np
@@ -60,44 +60,117 @@ class MinerState:
     # Internal helpers
     # ---------------------------
 
-    def _t2i_param_sweep(self) -> List[dict]:
+    def _t2i_param_sweep(self) -> List[Dict]:
         """
-        Produce a small sweep of params for T2I retries.
-        Keep it tight to preserve style but enable escape from local minima.
+        Sweep T2I parameters across retry attempts.
+        Ensure baseline is tried first, then jittered variants.
         """
-        base = dict(
-            steps=self.cfg.t2i_steps,
-            guidance=self.cfg.t2i_guidance,
-            res=self.cfg.t2i_res,
-        )
-        tries = []
+        base_steps = self.cfg.t2i_steps
+        base_guidance = self.cfg.t2i_guidance
+        base_res = self.cfg.t2i_res
+
+        tries: List[Dict] = []
+        # attempt index 0 is baseline
         for i in range(self.t2i_max_tries):
-            tries.append(
-                {
-                    "steps": base["steps"],
-                    "guidance": base["guidance"],
-                    "res": base["res"],
-                    "seed": random.randint(0, 2**31 - 1),
-                }
-            )
+            if i == 0:
+                tries.append(
+                    {
+                        "steps": base_steps,
+                        "guidance": base_guidance,
+                        "res": base_res,
+                        "seed": random.randint(0, 2**31 - 1),
+                    }
+                )
+            else:
+                # jitter amplitude decays or is small
+                # e.g. ±10% for steps, ±0.5 for guidance
+                frac = 0.1  # 10% jitter for steps
+                delta_steps = int(
+                    round(base_steps * frac * ((i) / (self.t2i_max_tries - 1)))
+                )
+                # alternate sign
+                if i % 2 == 1:
+                    steps = base_steps + delta_steps
+                else:
+                    steps = base_steps - delta_steps
+
+                delta_guidance = 0.5 * ((i) / (self.t2i_max_tries - 1))
+
+                if i % 2 == 1:
+                    guidance = base_guidance + delta_guidance
+                else:
+                    guidance = base_guidance - delta_guidance
+
+                tries.append(
+                    {
+                        "steps": max(1, steps),
+                        "guidance": guidance,
+                        "res": base_res,
+                        "seed": random.randint(0, 2**31 - 1),
+                    }
+                )
         return tries
 
-    def _trellis_param_sweep(self) -> List[dict]:
+    def _trellis_param_sweep(self) -> List[Dict]:
         """
-        Produce a small sweep of Trellis params for retries.
-        Keep changes mild to avoid big latency swings.
+        Sweep Trellis parameters for retries.
+        Baseline first, then jitter structural + cfg values.
         """
-        tries = []
-        for _ in range(self.trellis_max_tries):
-            tries.append(
-                {
-                    "struct_steps": self.cfg.trellis_struct_steps,
-                    "slat_steps": self.cfg.trellis_slat_steps,
-                    "cfg_struct": self.cfg.trellis_cfg_struct,
-                    "cfg_slat": self.cfg.trellis_cfg_slat,
-                    "seed": random.randint(0, 2**31 - 1),
-                }
-            )
+        bs = self.cfg.trellis_struct_steps
+        bl = self.cfg.trellis_slat_steps
+        bc = self.cfg.trellis_cfg_struct
+        bd = self.cfg.trellis_cfg_slat
+
+        tries: List[Dict] = []
+        for i in range(self.trellis_max_tries):
+            if i == 0:
+                tries.append(
+                    {
+                        "struct_steps": bs,
+                        "slat_steps": bl,
+                        "cfg_struct": bc,
+                        "cfg_slat": bd,
+                        "seed": random.randint(0, 2**31 - 1),
+                    }
+                )
+            else:
+                # jitter scale: ±15% steps, ±0.4 cfg
+                frac_steps = 0.15
+                frac_cfg = 0.4
+
+                delta_ss = int(
+                    round(bs * frac_steps * ((i) / (self.trellis_max_tries - 1)))
+                )
+                delta_sl = int(
+                    round(bl * frac_steps * ((i) / (self.trellis_max_tries - 1)))
+                )
+
+                if i % 2 == 1:
+                    struct_steps = bs + delta_ss
+                    slat_steps = bl + delta_sl
+                else:
+                    struct_steps = bs - delta_ss
+                    slat_steps = bl - delta_sl
+
+                delta_c_str = frac_cfg * ((i) / (self.trellis_max_tries - 1))
+                delta_c_slat = frac_cfg * ((i) / (self.trellis_max_tries - 1))
+
+                if i % 2 == 1:
+                    cfg_struct = bc + delta_c_str
+                    cfg_slat = bd + delta_c_slat
+                else:
+                    cfg_struct = bc - delta_c_str
+                    cfg_slat = bd - delta_c_slat
+
+                tries.append(
+                    {
+                        "struct_steps": max(1, struct_steps),
+                        "slat_steps": max(1, slat_steps),
+                        "cfg_struct": cfg_struct,
+                        "cfg_slat": cfg_slat,
+                        "seed": random.randint(0, 2**31 - 1),
+                    }
+                )
         return tries
 
     async def _gen_one_image(self, prompt: str, params: dict):
