@@ -72,28 +72,10 @@ class MinerState:
         )
         tries = []
         for i in range(self.t2i_max_tries):
-            # Light variation: +/- 10% steps, guidance jitter in [ -0.5, +0.5 ]
-            steps = (
-                int(
-                    round(
-                        base["steps"]
-                        * (1.0 + (i - 0.5) * 0.15 / max(1, self.t2i_max_tries - 1))
-                    )
-                )
-                if i != 0
-                else base["steps"]
-            )
-            guidance = (
-                float(
-                    base["guidance"] + (i - 0.5) * 1.0 / max(1, self.t2i_max_tries - 1)
-                )
-                if i != 0
-                else base["guidance"]
-            )
             tries.append(
                 {
-                    "steps": steps,
-                    "guidance": max(1.0, guidance),
+                    "steps": base["steps"],
+                    "guidance": base["guidance"],
                     "res": base["res"],
                     "seed": random.randint(0, 2**31 - 1),
                 }
@@ -106,55 +88,13 @@ class MinerState:
         Keep changes mild to avoid big latency swings.
         """
         tries = []
-        for i in range(self.trellis_max_tries):
-            struct_steps = (
-                max(
-                    8,
-                    int(
-                        round(
-                            self.cfg.trellis_struct_steps
-                            * (
-                                1.0
-                                + (i - 0.5) * 0.2 / max(1, self.trellis_max_tries - 1)
-                            )
-                        )
-                    ),
-                )
-                if i != 0
-                else self.cfg.trellis_struct_steps
-            )
-            slat_steps = (
-                max(
-                    8,
-                    int(
-                        round(
-                            self.cfg.trellis_slat_steps
-                            * (
-                                1.0
-                                + (0.5 - i) * 0.2 / max(1, self.trellis_max_tries - 1)
-                            )
-                        )
-                    ),
-                )
-                if i != 0
-                else self.cfg.trellis_slat_steps
-            )
-            cfg_struct = (
-                max(0.5, float(self.cfg.trellis_cfg_struct + (i - 0.5) * 0.4))
-                if i != 0
-                else self.cfg.trellis_cfg_struct
-            )
-            cfg_slat = (
-                max(0.5, float(self.cfg.trellis_cfg_slat + (0.5 - i) * 0.4))
-                if i != 0
-                else self.cfg.trellis_cfg_slat
-            )
+        for _ in range(self.trellis_max_tries):
             tries.append(
                 {
-                    "struct_steps": struct_steps,
-                    "slat_steps": slat_steps,
-                    "cfg_struct": cfg_struct,
-                    "cfg_slat": cfg_slat,
+                    "struct_steps": self.cfg.trellis_struct_steps,
+                    "slat_steps": self.cfg.trellis_slat_steps,
+                    "cfg_struct": self.cfg.trellis_cfg_struct,
+                    "cfg_slat": self.cfg.trellis_cfg_slat,
                     "seed": random.randint(0, 2**31 - 1),
                 }
             )
