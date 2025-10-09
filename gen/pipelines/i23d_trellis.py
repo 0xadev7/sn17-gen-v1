@@ -14,8 +14,6 @@ class TrellisImageTo3D:
         steps_slat: int,
         cfg_struct: float,
         cfg_slat: float,
-        max_gs: int,
-        target_mb: int,
     ):
         self.pipe = TrellisImageTo3DPipeline.from_pretrained(
             "microsoft/TRELLIS-image-large"
@@ -26,8 +24,6 @@ class TrellisImageTo3D:
         self.steps_slat = steps_slat
         self.cfg_struct = cfg_struct
         self.cfg_slat = cfg_slat
-        self.max_gs = max_gs
-        self.target_mb = target_mb
 
     @torch.inference_mode()
     async def infer_to_ply(

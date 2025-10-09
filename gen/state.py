@@ -37,8 +37,6 @@ class MinerState:
             cfg.trellis_slat_steps,
             cfg.trellis_cfg_struct,
             cfg.trellis_cfg_slat,
-            cfg.trellis_max_gaussians,
-            cfg.trellis_target_mb,
         )
 
         # Validators
