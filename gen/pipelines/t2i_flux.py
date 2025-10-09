@@ -14,10 +14,14 @@ class FluxText2Image:
         self.pipe.to(device)
         self.device = device
 
+    def tune_prompt(self, prompt: str) -> str:
+        return prompt + ", neutral background, high quality object"
+
     @torch.inference_mode()
     async def generate(
         self, prompt: str, steps: int, guidance: float, res: int
     ) -> Image.Image:
+        prompt = self.tune_prompt(prompt)
         out = self.pipe(
             prompt=prompt,
             num_inference_steps=steps,
