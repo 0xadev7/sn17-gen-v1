@@ -71,7 +71,7 @@ class MinerState:
 
         tries: List[Dict] = []
         for i in range(self.t2i_max_tries):
-            delta_steps = int(i / 2)
+            delta_steps = i % 2
 
             if i % 2 == 1:
                 steps = base_steps + delta_steps

@@ -15,7 +15,7 @@ class FluxText2Image:
         self.device = device
 
     def tune_prompt(self, prompt: str) -> str:
-        suffix = " | studio lighting, neutral gray background, single centered object, high detail, product photo, used for 3D gaussian splat generation"
+        suffix = ", neutral background, single centered object"
         return f"{prompt.strip()} {suffix}"
 
     @torch.inference_mode()
