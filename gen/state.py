@@ -70,7 +70,6 @@ class MinerState:
         base_res = self.cfg.t2i_res
 
         tries: List[Dict] = []
-        # attempt index 0 is baseline
         for i in range(self.t2i_max_tries):
             if i == 0:
                 tries.append(
@@ -82,9 +81,7 @@ class MinerState:
                     }
                 )
             else:
-                # jitter amplitude decays or is small
-                # e.g. ±10% for steps, ±0.5 for guidance
-                frac = 0.1  # 10% jitter for steps
+                frac = 0.5  # 50% jitter for steps
                 delta_steps = int(
                     round(base_steps * frac * ((i) / (self.t2i_max_tries - 1)))
                 )
@@ -94,17 +91,10 @@ class MinerState:
                 else:
                     steps = base_steps - delta_steps
 
-                delta_guidance = 0.5 * ((i) / (self.t2i_max_tries - 1))
-
-                if i % 2 == 1:
-                    guidance = base_guidance + delta_guidance
-                else:
-                    guidance = base_guidance - delta_guidance
-
                 tries.append(
                     {
                         "steps": max(1, steps),
-                        "guidance": guidance,
+                        "guidance": base_guidance,
                         "res": base_res,
                         "seed": random.randint(0, 2**31 - 1),
                     }
