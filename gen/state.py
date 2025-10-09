@@ -81,10 +81,7 @@ class MinerState:
                     }
                 )
             else:
-                frac = 0.1  # 10% jitter for steps
-                delta_steps = int(
-                    round(base_steps * frac * ((i) / (self.t2i_max_tries - 1)))
-                )
+                delta_steps = i / 2
                 # alternate sign
                 if i % 2 == 1:
                     steps = base_steps + delta_steps
