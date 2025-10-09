@@ -71,31 +71,21 @@ class MinerState:
 
         tries: List[Dict] = []
         for i in range(self.t2i_max_tries):
-            if i == 0:
-                tries.append(
-                    {
-                        "steps": base_steps,
-                        "guidance": base_guidance,
-                        "res": base_res,
-                        "seed": random.randint(0, 2**31 - 1),
-                    }
-                )
-            else:
-                delta_steps = i / 2
-                # alternate sign
-                if i % 2 == 1:
-                    steps = base_steps + delta_steps
-                else:
-                    steps = base_steps - delta_steps
+            delta_steps = i / 2
 
-                tries.append(
-                    {
-                        "steps": max(1, steps),
-                        "guidance": base_guidance,
-                        "res": base_res,
-                        "seed": random.randint(0, 2**31 - 1),
-                    }
-                )
+            if i % 2 == 1:
+                steps = base_steps + delta_steps
+            else:
+                steps = base_steps - delta_steps
+
+            tries.append(
+                {
+                    "steps": max(1, steps),
+                    "guidance": base_guidance,
+                    "res": base_res,
+                    "seed": random.randint(0, 2**31 - 1),
+                }
+            )
         return tries
 
     def _trellis_param_sweep(self) -> List[Dict]:
