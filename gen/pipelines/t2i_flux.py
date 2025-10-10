@@ -16,7 +16,7 @@ class FluxText2Image:
         self.device = device
 
     def tune_prompt(self, prompt: str) -> str:
-        suffix = " | removable neutral background, high quality 3D object, high CLIP score | this image will be used as an input for TRELLIS model for 3D object generation."
+        suffix = " | removable neutral background, high quality 3D object centered"
         return f"{prompt.strip()} {suffix}"
 
     @torch.inference_mode()
