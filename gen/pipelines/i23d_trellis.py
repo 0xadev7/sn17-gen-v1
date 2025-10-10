@@ -1,8 +1,7 @@
 from __future__ import annotations
-import io, torch, os
-from typing import List, Optional, Tuple
+import io, torch
+from typing import Optional
 from PIL import Image
-
 from gen.lib.trellis.pipelines import TrellisImageTo3DPipeline
 
 
@@ -15,10 +14,11 @@ class TrellisImageTo3D:
         cfg_struct: float,
         cfg_slat: float,
     ):
+        self.device = device
         self.pipe = TrellisImageTo3DPipeline.from_pretrained(
             "microsoft/TRELLIS-image-large"
         )
-        self.pipe.cuda()
+        self.pipe.to(self.device)
 
         self.steps_struct = steps_struct
         self.steps_slat = steps_slat
@@ -29,11 +29,11 @@ class TrellisImageTo3D:
     async def infer_to_ply(
         self,
         image: Image.Image,
-        struct_steps=None,
-        slat_steps=None,
-        cfg_struct=None,
-        cfg_slat=None,
-        seed=None,
+        struct_steps: Optional[int] = None,
+        slat_steps: Optional[int] = None,
+        cfg_struct: Optional[float] = None,
+        cfg_slat: Optional[float] = None,
+        seed: Optional[int] = None,
     ) -> bytes:
         outputs = self.pipe.run(
             image,
@@ -52,8 +52,6 @@ class TrellisImageTo3D:
             },
         )
         gs = outputs["gaussian"][0]
-
-        # Export to PLY in-memory
         buf = io.BytesIO()
         gs.save_ply(buf)
         return buf.getvalue()

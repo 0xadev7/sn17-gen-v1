@@ -7,9 +7,10 @@ from PIL import Image
 
 class FluxText2Image:
     def __init__(self, device: torch.device):
+        dtype = torch.bfloat16 if device.type == "cuda" else torch.float32
         self.pipe = FluxPipeline.from_pretrained(
             "black-forest-labs/FLUX.1-schnell",
-            torch_dtype=torch.bfloat16,
+            torch_dtype=dtype,
         )
         self.pipe.to(device)
         self.device = device

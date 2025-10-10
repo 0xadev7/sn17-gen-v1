@@ -25,36 +25,42 @@ def _seed_everywhere(seed):
 class MinerState:
     def __init__(self, cfg: Config):
         self.cfg = cfg
-        torch.cuda.set_device(cfg.gpu_id)
-        self.device = torch.device(f"cuda:{cfg.gpu_id}")
 
-        # Pipelines
-        self.t2i = FluxText2Image(self.device)
-        self.bg_remover = BiRefNetRemover(self.device)
+        # Select devices explicitly (fallback to CPU if needed)
+        if torch.cuda.is_available():
+            self.t2i_device = torch.device(f"cuda:{cfg.t2i_gpu_id}")
+            self.aux_device = torch.device(f"cuda:{cfg.aux_gpu_id}")
+        else:
+            self.t2i_device = torch.device("cpu")
+            self.aux_device = torch.device("cpu")
+
+        # Pipelines on dedicated GPUs
+        self.t2i = FluxText2Image(self.t2i_device)
+        self.bg_remover = BiRefNetRemover(self.aux_device)
         self.trellis_img = TrellisImageTo3D(
-            self.device,
+            self.aux_device,
             cfg.trellis_struct_steps,
             cfg.trellis_slat_steps,
             cfg.trellis_cfg_struct,
             cfg.trellis_cfg_slat,
         )
 
-        # Validators
+        # Validators (HTTP)
         self.validator = ExternalValidator(
             cfg.validator_url_txt, cfg.validator_url_img, cfg.vld_threshold
         )
 
-        # Retry / budget knobs with sensible defaults if absent on cfg
+        # Retry/budget knobs...
         self.t2i_max_tries: int = getattr(cfg, "t2i_max_tries", 3)
         self.trellis_max_tries: int = getattr(cfg, "trellis_max_tries", 2)
         self.early_stop_score: float = getattr(
             cfg, "early_stop_score", max(0.0, cfg.vld_threshold)
         )
-        self.time_budget_s: Optional[float] = getattr(
-            cfg, "time_budget_s", None
-        )  # None = no budget
+        self.time_budget_s: Optional[float] = getattr(cfg, "time_budget_s", None)
 
-        logger.info("Models loaded and warmed-up.")
+        logger.info(
+            f"Models loaded. T2I on {self.t2i_device}, BiRefNet+Trellis on {self.aux_device}."
+        )
 
     # ---------------------------
     # Internal helpers

@@ -9,7 +9,11 @@ load_dotenv()
 @dataclass
 class Config:
     port: int = int(os.getenv("PORT", 7000))
-    gpu_id: int = int(os.getenv("GPU_ID", 0))
+
+    # Split GPU assignment
+    t2i_gpu_id: int = int(os.getenv("T2I_GPU_ID", 1))
+    aux_gpu_id: int = int(os.getenv("AUX_GPU_ID", 0))
+
     timeout_s: float = float(os.getenv("TIMEOUT_S", 30.0))
 
     # Validation

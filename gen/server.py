@@ -25,17 +25,10 @@ async def lifespan(app: FastAPI):
     """
     global STATE
     try:
-        # Optional: set CUDA device if your Config has gpu_id
-        try:
-            import torch  # local import so CPU-only envs don't fail import at import-time
-
-            if torch.cuda.is_available():
-                torch.cuda.set_device(CFG.gpu_id)
-        except Exception as e:
-            logger.warning(f"[lifespan] CUDA device selection skipped: {e}")
-
         STATE = MinerState(CFG)
-        logger.info(f"Server up. Port={CFG.port}, GPU={CFG.gpu_id}")
+        logger.info(
+            f"Server up. Port={CFG.port}, T2I_GPU={CFG.t2i_gpu_id}, AUX_GPU={CFG.aux_gpu_id}"
+        )
     except Exception as e:
         # Do NOT crash app; let /health expose failure
         STATE = None
