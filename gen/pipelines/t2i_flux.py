@@ -16,18 +16,20 @@ class FluxText2Image:
         self.device = device
 
     def tune_prompt(self, prompt: str) -> str:
-        suffix = ", neutral background, single centered object"
+        suffix = ", neutral background"
         return f"{prompt.strip()} {suffix}"
 
     @torch.inference_mode()
     async def generate(
-        self, prompt: str, steps: int, guidance: float, res: int
+        self, prompt: str, steps: int, guidance: float, res: int, seed=0
     ) -> Image.Image:
         prompt = self.tune_prompt(prompt)
         out = self.pipe(
             prompt=prompt,
             num_inference_steps=steps,
             guidance_scale=guidance,
+            max_sequence_length=256,
+            generator=torch.Generator("cpu").manual_seed(seed),
             height=res,
             width=res,
         )

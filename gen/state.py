@@ -15,13 +15,6 @@ from gen.pipelines.i23d_trellis import TrellisImageTo3D
 from gen.validators.external_validator import ExternalValidator
 
 
-def _seed_everywhere(seed):
-    random.seed(seed)
-    np.random.seed(seed & 0xFFFFFFFF)
-    torch.manual_seed(seed)
-    torch.cuda.manual_seed_all(seed)
-
-
 class MinerState:
     def __init__(self, cfg: Config):
         self.cfg = cfg
@@ -157,14 +150,12 @@ class MinerState:
         return tries
 
     async def _gen_one_image(self, prompt: str, params: dict):
-        seed = params.get("seed")
-        _seed_everywhere(seed)
-
         img = await self.t2i.generate(
             prompt,
             steps=params["steps"],
             guidance=params["guidance"],
             res=params["res"],
+            seed=params["seed"],
         )
 
         return img, params
