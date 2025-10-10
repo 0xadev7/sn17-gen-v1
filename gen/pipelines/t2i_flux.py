@@ -16,7 +16,7 @@ class FluxText2Image:
         self.device = device
 
     def tune_prompt(self, prompt: str) -> str:
-        suffix = " | removable neutral background, high quality 3D object centered"
+        suffix = " | transparent background, high quality object centered and highlighted"
         return f"{prompt.strip()} {suffix}"
 
     @torch.inference_mode()
