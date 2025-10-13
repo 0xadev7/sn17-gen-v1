@@ -42,4 +42,4 @@ class Config:
     trellis_max_tries: int = int(os.getenv("TRELLIS_MAX_TRIES", 3))
 
     # Save intermediary results
-    debug_save: bool = bool(os.getenv("DEBUG_SAVE"))
+    debug_save: bool = os.getenv("DEBUG_SAVE", "0") == "1"
