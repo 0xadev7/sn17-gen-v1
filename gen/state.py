@@ -1,8 +1,8 @@
 from __future__ import annotations
 import base64
 import io
+import contextlib
 from typing import Dict, Tuple, Optional, List
-import os
 from loguru import logger
 import asyncio, time, random
 import numpy as np
@@ -14,7 +14,6 @@ from gen.pipelines.t2i_flux import FluxText2Image
 from gen.pipelines.bg_birefnet import BiRefNetRemover
 from gen.pipelines.i23d_trellis import TrellisImageTo3D
 from gen.validators.external_validator import ExternalValidator
-from gen.utils.rankers import rank_images_quick
 
 
 class MinerState:
@@ -25,6 +24,7 @@ class MinerState:
         if torch.cuda.is_available():
             self.t2i_device = torch.device(f"cuda:{cfg.t2i_gpu_id}")
             self.aux_device = torch.device(f"cuda:{cfg.aux_gpu_id}")
+            torch.backends.cudnn.benchmark = True
         else:
             self.t2i_device = torch.device("cpu")
             self.aux_device = torch.device("cpu")
@@ -183,77 +183,201 @@ class MinerState:
             return True
         return (time.time() - start_ts) < self.time_budget_s
 
+    def _now(self) -> float:
+        return time.time()
+
+    def _deadline(self, start_ts: float) -> float:
+        if self.time_budget_s is None:
+            # default to very large window
+            return start_ts + 10_000
+        return start_ts + self.time_budget_s
+
+    def _time_left(self, deadline: float) -> float:
+        return max(0.0, deadline - self._now())
+
+    # Optional: mini-batcher for T2I if you later want to chunk seeds; here we just
+    # limit concurrency via semaphore.
+    async def _generate_batch(
+        self, prompt: str, param_list: List[Dict], sem: asyncio.Semaphore
+    ):
+        async def one(p):
+            async with sem:
+                return await self._gen_one_image(prompt, p)
+
+        return await asyncio.gather(*[one(p) for p in param_list])
+
     # ---------------------------
     # Public APIs with retries
     # ---------------------------
-    @torch.inference_mode()
+
     async def text_to_ply(self, prompt: str) -> Tuple[bytes, float]:
-        start = time.time()
+        start_ts = time.time()
 
-        # ---------- Flux: batch N seeds ----------
-        N = 6  # try 5–6
-        seeds = [random.randint(0, 2**31 - 1) for _ in range(N)]
-        steps = self.cfg.t2i_steps
-        res = max(768, min(896, self.cfg.t2i_res))
-        guidance = self.cfg.t2i_guidance
+        # 1) Generate multiple images (fan-out)
+        t2i_params = self._t2i_param_sweep()
+        image_tasks = [self._gen_one_image(prompt, p) for p in t2i_params]
 
-        imgs = await self.t2i.generate_batch(
-            prompt=prompt, seeds=seeds, steps=steps, guidance=guidance, res=res
-        )
+        # If you need stricter SLA, you can limit concurrency here.
+        t2i_results: List[Tuple] = await asyncio.gather(*image_tasks)
 
-        # ---------- Batched BG removal ----------
-        fgs = self.bg_remover.remove_batch(imgs)
+        best_score = -1.0
+        best_ply: bytes = b""
 
-        # ---------- Fast ranker on CPU (pick top-4) ----------
-        # Heuristic: prefer larger foreground mask area & centered mass; or use tiny CLIP on CPU.
-        ranked = rank_images_quick(fgs, prompt, top_k=4)  # returns indices
-
-        best_score, best_ply = -1.0, b""
-        passed_count = 0
-
-        async def validate_async(ply_bytes):
-            # non-blocking validation (CPU/network)
-            score, passed, _ = await self.validator.validate_text(prompt, ply_bytes)
-            return score, (ply_bytes if passed else b""), passed
-
-        # ---------- Trellis sequential (GPU-saturating) ----------
-        val_tasks: List[asyncio.Task] = []
-        for idx in ranked:
-            if (time.time() - start) > (self.time_budget_s or 1e9):
-                break
-            fg = fgs[idx]
-
-            ply_bytes = await self.trellis_img.infer_to_ply(
-                fg,
-                struct_steps=self.cfg.trellis_struct_steps,
-                slat_steps=self.cfg.trellis_slat_steps,
-                cfg_struct=self.cfg.trellis_cfg_struct,
-                cfg_slat=self.cfg.trellis_cfg_slat,
-                seed=seeds[idx],
-            )
-
-            if not ply_bytes:
-                continue
-
-            # Launch validation but don't block GPU
-            val_tasks.append(asyncio.create_task(validate_async(ply_bytes)))
-
-            # Optional: brief yield to let validation start
-            await asyncio.sleep(0)
-
-            # Soft early-stop if we already have 4 validations launched
-            if len(val_tasks) >= 4:
+        for img, iparams in t2i_results:
+            if not self._within_budget(start_ts):
+                logger.warning("Budget exhausted after T2I; stopping.")
                 break
 
-        # ---------- Collect validations ----------
-        for t in asyncio.as_completed(val_tasks):
-            score, maybe_ply, passed = await t
-            best_score = max(best_score, score)
-            if passed:
-                best_ply = maybe_ply
-                passed_count += 1
-            if best_score >= self.early_stop_score:
-                break
+            # 2) Background removal
+            fg, _ = self.bg_remover.remove(img)
+
+            # 3) Multiple Trellis tries (usually sequential to avoid GPU thrash)
+            for tparams in self._trellis_param_sweep():
+                if not self._within_budget(start_ts):
+                    logger.warning("Budget exhausted mid-Trellis; stopping.")
+                    break
+
+                ply_bytes, _ = await self._trellis_one(fg, tparams)
+
+                if len(ply_bytes) == 0:
+                    continue
+
+                # 4) Validate
+                score, passed, _ = await self.validator.validate_text(prompt, ply_bytes)
+                logger.info(
+                    f"[text] T2I{iparams}|TRELLIS{tparams} -> score={score:.4f}, passed={passed}"
+                )
+
+                if score > best_score:
+                    best_score, best_ply = score, ply_bytes
+
+                # Early stop if we’ve cleared a high bar
+                if score >= self.early_stop_score:
+                    logger.info(
+                        f"[text] Early-stop: score {score:.4f} >= {self.early_stop_score:.4f}"
+                    )
+                    return (ply_bytes if passed else b""), score
+
+        # Return best seen (respect validator threshold)
+        final_pass = best_score >= self.cfg.vld_threshold
+        return (best_ply if final_pass else b""), max(0.0, best_score)
+
+    async def text_to_ply_parallel(
+        self,
+        prompt: str,
+    ) -> Tuple[bytes, float]:
+        """
+        Overlapped pipeline:
+          T2I (producer on t2i_device) -> queue -> workers run (BG -> Trellis -> validate)
+        """
+        start_ts = self._now()
+        deadline = self._deadline(start_ts)
+
+        # Queues & state
+        q: asyncio.Queue = asyncio.Queue(maxsize=self.cfg.trellis_workers * 2)
+        stop_event = asyncio.Event()
+
+        best_score = -1.0
+        best_ply: bytes = b""
+
+        # --- Producer: generate images with varied steps/seed and push to queue ----
+        t2i_params = self._t2i_param_sweep()
+
+        async def producer():
+            sem = asyncio.Semaphore(self.cfg.t2i_concurrency)
+            # Launch T2I tasks but push to queue as each finish (streaming)
+            produce_tasks = [
+                asyncio.create_task(self._gen_one_image(prompt, p)) for p in t2i_params
+            ]
+
+            try:
+                for coro in asyncio.as_completed(produce_tasks):
+                    if stop_event.is_set() or self._time_left(deadline) <= 0:
+                        break
+                    try:
+                        img, iparams = await coro
+                    except Exception as e:
+                        logger.error(f"T2I failed: {e}")
+                        continue
+                    await q.put((img, iparams))
+            finally:
+                # Signal no more items
+                for _ in range(self.cfg.trellis_workers):
+                    await q.put(None)
+
+        # --- Worker: pull images and try a few Trellis variants each ---------------
+        async def worker(worker_id: int):
+            nonlocal best_score, best_ply
+            while not stop_event.is_set():
+                # Budget check
+                if self._time_left(deadline) <= 0:
+                    break
+
+                item = await q.get()
+                if item is None:
+                    q.task_done()
+                    break
+
+                img, iparams = item
+                try:
+                    # 1) BG removal (fast on aux_device)
+                    fg, _ = self.bg_remover.remove(img)
+
+                    # 2) Try a *few* Trellis variants for this image
+                    #    We cap per-image tries to keep throughput high.
+                    tparams_all = self._trellis_param_sweep()
+                    tparams_subset = tparams_all[
+                        : max(1, self.cfg.trellis_tries_per_image)
+                    ]
+
+                    for tparams in tparams_subset:
+                        if stop_event.is_set() or self._time_left(deadline) <= 0:
+                            break
+
+                        ply_bytes, _ = await self._trellis_one(fg, tparams)
+                        if not ply_bytes:
+                            continue
+
+                        # 3) Validate (HTTP: overlap friendly)
+                        score, passed, _ = await self.validator.validate_text(
+                            prompt, ply_bytes
+                        )
+                        logger.info(
+                            f"[text|W{worker_id}] T2I{iparams}|TRELLIS{tparams} -> {score:.4f} (passed={passed})"
+                        )
+
+                        if score > best_score:
+                            best_score, best_ply = score, (
+                                ply_bytes if passed else best_ply
+                            )
+
+                        # Early stop
+                        if score >= self.early_stop_score:
+                            logger.info(
+                                f"[text] Early-stop: {score:.4f} >= {self.early_stop_score:.4f}"
+                            )
+                            stop_event.set()
+                            break
+                except Exception as e:
+                    logger.error(f"Worker {worker_id} error: {e}")
+                finally:
+                    q.task_done()
+
+        # Run producer+workers
+        workers = [
+            asyncio.create_task(worker(i)) for i in range(self.cfg.trellis_workers)
+        ]
+        prod = asyncio.create_task(producer())
+
+        try:
+            await asyncio.wait([prod, *workers], return_when=asyncio.ALL_COMPLETED)
+        finally:
+            stop_event.set()
+            # Drain queue if anything left
+            with contextlib.suppress(Exception):
+                while not q.empty():
+                    q.get_nowait()
+                    q.task_done()
 
         final_pass = best_score >= self.cfg.vld_threshold
         return (best_ply if final_pass else b""), max(0.0, best_score)
