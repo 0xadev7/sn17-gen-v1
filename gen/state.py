@@ -2,6 +2,7 @@ from __future__ import annotations
 import base64
 import io
 from typing import Dict, Tuple, Optional, List
+import os
 from loguru import logger
 import asyncio, time, random
 import numpy as np
@@ -188,6 +189,12 @@ class MinerState:
     async def text_to_ply(self, prompt: str) -> Tuple[bytes, float]:
         start_ts = time.time()
 
+        safe_prompt = "".join(
+            c if c.isalnum() or c in (" ", "_", "-") else "_" for c in prompt
+        )[:100]
+        out_dir = os.path.join("out", safe_prompt)
+        os.makedirs(out_dir, exist_ok=True)
+
         # 1) Generate multiple images (fan-out)
         t2i_params = self._t2i_param_sweep()
         image_tasks = [self._gen_one_image(prompt, p) for p in t2i_params]
@@ -198,13 +205,31 @@ class MinerState:
         best_score = -1.0
         best_ply: bytes = b""
 
-        for img, iparams in t2i_results:
+        for i, (img, iparams) in enumerate(t2i_results):
             if not self._within_budget(start_ts):
                 logger.warning("Budget exhausted after T2I; stopping.")
                 break
 
+            if self.cfg.debug_save:
+                # ---- SAVE Flux.Schnell output ----
+                flux_path = os.path.join(out_dir, f"flux_{i:02d}.png")
+                try:
+                    Image.fromarray(img).save(flux_path)
+                    logger.debug(f"Saved Flux output: {flux_path}")
+                except Exception as e:
+                    logger.warning(f"Failed to save Flux image: {e}")
+
             # 2) Background removal
             fg, _ = self.bg_remover.remove(img)
+
+            if self.cfg.debug_save:
+                # ---- SAVE background-removed output ----
+                bg_path = os.path.join(out_dir, f"nobg_{i:02d}.png")
+                try:
+                    Image.fromarray(fg).save(bg_path)
+                    logger.debug(f"Saved BG-removed image: {bg_path}")
+                except Exception as e:
+                    logger.warning(f"Failed to save BG-removed image: {e}")
 
             # 3) Multiple Trellis tries (usually sequential to avoid GPU thrash)
             for tparams in self._trellis_param_sweep():
