@@ -14,6 +14,7 @@ from gen.pipelines.t2i_flux import FluxText2Image
 from gen.pipelines.bg_birefnet import BiRefNetRemover
 from gen.pipelines.i23d_trellis import TrellisImageTo3D
 from gen.validators.external_validator import ExternalValidator
+from gen.utils.rankers import rank_images_quick
 
 
 class MinerState:
@@ -185,80 +186,76 @@ class MinerState:
     # ---------------------------
     # Public APIs with retries
     # ---------------------------
-
+    @torch.inference_mode()
     async def text_to_ply(self, prompt: str) -> Tuple[bytes, float]:
-        start_ts = time.time()
+        start = time.time()
 
-        safe_prompt = "".join(
-            c if c.isalnum() or c in (" ", "_", "-") else "_" for c in prompt
-        )[:100]
-        out_dir = os.path.join("out", safe_prompt)
-        os.makedirs(out_dir, exist_ok=True)
+        # ---------- Flux: batch N seeds ----------
+        N = 6  # try 5–6
+        seeds = [random.randint(0, 2**31 - 1) for _ in range(N)]
+        steps = self.cfg.t2i_steps
+        res   = max(768, min(896, self.cfg.t2i_res))
+        guidance = self.cfg.t2i_guidance
 
-        # 1) Generate multiple images (fan-out)
-        t2i_params = self._t2i_param_sweep()
-        image_tasks = [self._gen_one_image(prompt, p) for p in t2i_params]
+        with torch.autocast(device_type="cuda", dtype=torch.bfloat16):
+            imgs = await self.t2i.generate_batch(
+                prompt=prompt, seeds=seeds, steps=steps, guidance=guidance, res=res
+            )  # <-- implement .generate_batch inside FluxText2Image (stack tokens; batch infer)
 
-        # If you need stricter SLA, you can limit concurrency here.
-        t2i_results: List[Tuple] = await asyncio.gather(*image_tasks)
+        # ---------- Batched BG removal ----------
+        fgs = self.bg_remover.remove_batch(imgs)  # implement batch call (or loop with no sync)
 
-        best_score = -1.0
-        best_ply: bytes = b""
+        # ---------- Fast ranker on CPU (pick top-4) ----------
+        # Heuristic: prefer larger foreground mask area & centered mass; or use tiny CLIP on CPU.
+        ranked = rank_images_quick(fgs, prompt, top_k=4)  # returns indices
 
-        for i, (img, iparams) in enumerate(t2i_results):
-            if not self._within_budget(start_ts):
-                logger.warning("Budget exhausted after T2I; stopping.")
-                break
+        best_score, best_ply = -1.0, b""
+        passed_count = 0
 
-            if self.cfg.debug_save:
-                # ---- SAVE Flux.Schnell output ----
-                flux_path = os.path.join(out_dir, f"flux_{i:02d}.png")
-                try:
-                    img.save(flux_path)
-                    logger.debug(f"Saved Flux output: {flux_path}")
-                except Exception as e:
-                    logger.warning(f"Failed to save Flux image: {e}")
+        async def validate_async(ply_bytes):
+            # non-blocking validation (CPU/network)
+            score, passed, _ = await self.validator.validate_text(prompt, ply_bytes)
+            return score, (ply_bytes if passed else b""), passed
 
-            # 2) Background removal
-            fg, _ = self.bg_remover.remove(img)
+        # ---------- Trellis sequential (GPU-saturating) ----------
+        val_tasks: List[asyncio.Task] = []
+        for idx in ranked:
+            if (time.time() - start) > (self.time_budget_s or 1e9): break
+            fg = fgs[idx]
 
-            if self.cfg.debug_save:
-                # ---- SAVE background-removed output ----
-                bg_path = os.path.join(out_dir, f"nobg_{i:02d}.png")
-                try:
-                    fg.save(bg_path)
-                    logger.debug(f"Saved BG-removed image: {bg_path}")
-                except Exception as e:
-                    logger.warning(f"Failed to save BG-removed image: {e}")
-
-            # 3) Multiple Trellis tries (usually sequential to avoid GPU thrash)
-            for tparams in self._trellis_param_sweep():
-                if not self._within_budget(start_ts):
-                    logger.warning("Budget exhausted mid-Trellis; stopping.")
-                    break
-
-                ply_bytes, _ = await self._trellis_one(fg, tparams)
-
-                if len(ply_bytes) == 0:
-                    continue
-
-                # 4) Validate
-                score, passed, _ = await self.validator.validate_text(prompt, ply_bytes)
-                logger.info(
-                    f"[text] T2I{iparams}|TRELLIS{tparams} -> score={score:.4f}, passed={passed}"
+            with torch.autocast(device_type="cuda", dtype=torch.bfloat16):
+                ply_bytes = await self.trellis_img.infer_to_ply(
+                    fg,
+                    struct_steps=self.cfg.trellis_struct_steps,
+                    slat_steps=self.cfg.trellis_slat_steps,
+                    cfg_struct=self.cfg.trellis_cfg_struct,
+                    cfg_slat=self.cfg.trellis_cfg_slat,
+                    seed=seeds[idx],
                 )
 
-                if score > best_score:
-                    best_score, best_ply = score, ply_bytes
+            if not ply_bytes:
+                continue
 
-                # Early stop if we’ve cleared a high bar
-                if score >= self.early_stop_score:
-                    logger.info(
-                        f"[text] Early-stop: score {score:.4f} >= {self.early_stop_score:.4f}"
-                    )
-                    return (ply_bytes if passed else b""), score
+            # Launch validation but don't block GPU
+            val_tasks.append(asyncio.create_task(validate_async(ply_bytes)))
 
-        # Return best seen (respect validator threshold)
+            # Optional: brief yield to let validation start
+            await asyncio.sleep(0)
+
+            # Soft early-stop if we already have 4 validations launched
+            if len(val_tasks) >= 4:
+                break
+
+        # ---------- Collect validations ----------
+        for t in asyncio.as_completed(val_tasks):
+            score, maybe_ply, passed = await t
+            best_score = max(best_score, score)
+            if passed:
+                best_ply = maybe_ply
+                passed_count += 1
+            if best_score >= self.early_stop_score:
+                break
+
         final_pass = best_score >= self.cfg.vld_threshold
         return (best_ply if final_pass else b""), max(0.0, best_score)
 
