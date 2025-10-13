@@ -194,16 +194,15 @@ class MinerState:
         N = 6  # try 5–6
         seeds = [random.randint(0, 2**31 - 1) for _ in range(N)]
         steps = self.cfg.t2i_steps
-        res   = max(768, min(896, self.cfg.t2i_res))
+        res = max(768, min(896, self.cfg.t2i_res))
         guidance = self.cfg.t2i_guidance
 
-        with torch.autocast(device_type="cuda", dtype=torch.bfloat16):
-            imgs = await self.t2i.generate_batch(
-                prompt=prompt, seeds=seeds, steps=steps, guidance=guidance, res=res
-            )  # <-- implement .generate_batch inside FluxText2Image (stack tokens; batch infer)
+        imgs = await self.t2i.generate_batch(
+            prompt=prompt, seeds=seeds, steps=steps, guidance=guidance, res=res
+        )
 
         # ---------- Batched BG removal ----------
-        fgs = self.bg_remover.remove_batch(imgs)  # implement batch call (or loop with no sync)
+        fgs = self.bg_remover.remove_batch(imgs)
 
         # ---------- Fast ranker on CPU (pick top-4) ----------
         # Heuristic: prefer larger foreground mask area & centered mass; or use tiny CLIP on CPU.
@@ -220,18 +219,18 @@ class MinerState:
         # ---------- Trellis sequential (GPU-saturating) ----------
         val_tasks: List[asyncio.Task] = []
         for idx in ranked:
-            if (time.time() - start) > (self.time_budget_s or 1e9): break
+            if (time.time() - start) > (self.time_budget_s or 1e9):
+                break
             fg = fgs[idx]
 
-            with torch.autocast(device_type="cuda", dtype=torch.bfloat16):
-                ply_bytes = await self.trellis_img.infer_to_ply(
-                    fg,
-                    struct_steps=self.cfg.trellis_struct_steps,
-                    slat_steps=self.cfg.trellis_slat_steps,
-                    cfg_struct=self.cfg.trellis_cfg_struct,
-                    cfg_slat=self.cfg.trellis_cfg_slat,
-                    seed=seeds[idx],
-                )
+            ply_bytes = await self.trellis_img.infer_to_ply(
+                fg,
+                struct_steps=self.cfg.trellis_struct_steps,
+                slat_steps=self.cfg.trellis_slat_steps,
+                cfg_struct=self.cfg.trellis_cfg_struct,
+                cfg_slat=self.cfg.trellis_cfg_slat,
+                seed=seeds[idx],
+            )
 
             if not ply_bytes:
                 continue
