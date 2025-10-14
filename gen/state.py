@@ -160,10 +160,15 @@ class MinerState:
                 if ("illegal memory access" in msg) or ("device-side assert" in msg):
                     if attempt == 1:
                         # Allow Trellis wrapper to mark poisoned & reinit; then retry once
-                        self._log_cuda("[GPU1] Trellis illegal access; reinit & retry.", self.aux_device)
+                        self._log_cuda(
+                            "[GPU1] Trellis illegal access; reinit & retry.",
+                            self.aux_device,
+                        )
                         continue
                 if "out of memory" in msg:
-                    self._log_cuda("[GPU1] Trellis OOM; drop this try.", self.aux_device)
+                    self._log_cuda(
+                        "[GPU1] Trellis OOM; drop this try.", self.aux_device
+                    )
                     return b"", params
                 # Unknown runtime — return empty to keep the pipeline flowing
                 self._log_cuda(f"[GPU1] Trellis runtime error: {e}", self.aux_device)
