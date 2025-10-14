@@ -30,19 +30,16 @@ class Config:
 
     # Text-to-2D parameters
     t2i_steps: int = int(os.getenv("T2I_STEPS", 2))
-    t2i_guidance: float = float(os.getenv("T2I_GUIDANCE", 4.0))
-    t2i_res: int = int(os.getenv("T2I_RES", 1024))
-    t2i_max_tries: int = int(os.getenv("T2I_MAX_TRIES", 1))
-    t2i_concurrency: int = int(os.getenv("T2I_CONCURRENCY", 2))
+    t2i_guidance: float = float(os.getenv("T2I_GUIDANCE", 0.0))
+    t2i_res: int = int(os.getenv("T2I_RES", 896))
+    t2i_max_tries: int = int(os.getenv("T2I_MAX_TRIES", 6))
 
     # Trellis parameters
-    trellis_struct_steps: int = int(os.getenv("TRELLIS_STRUCT_STEPS", 12))
-    trellis_slat_steps: int = int(os.getenv("TRELLIS_SLAT_STEPS", 12))
+    trellis_struct_steps: int = int(os.getenv("TRELLIS_STRUCT_STEPS", 10))
+    trellis_slat_steps: int = int(os.getenv("TRELLIS_SLAT_STEPS", 10))
     trellis_cfg_struct: float = float(os.getenv("TRELLIS_CFG_STRUCT", 7.5))
     trellis_cfg_slat: float = float(os.getenv("TRELLIS_CFG_SLAT", 3.0))
-    trellis_max_tries: int = int(os.getenv("TRELLIS_MAX_TRIES", 3))
-    trellis_workers: int = int(os.getenv("TRELLIS_WORKERS", 2))
-    trellis_tries_per_image: int = int(os.getenv("TRELLIS_TRIES_PER_IMAGE", 2))
+    trellis_max_tries: int = int(os.getenv("TRELLIS_MAX_TRIES", 1))
 
     # Save intermediary results
     debug_save: bool = os.getenv("DEBUG_SAVE", "0") == "1"

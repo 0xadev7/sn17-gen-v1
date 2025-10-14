@@ -78,7 +78,7 @@ async def generate(
             return await STATE.image_to_ply(image_b64)
         else:
             assert prompt is not None and prompt.strip(), "Empty text prompt"
-            return await STATE.text_to_ply_parallel(prompt.strip())
+            return await STATE.text_to_ply(prompt.strip())
 
     # Fallback to 30s if your Config doesn’t define timeout_s
     timeout_s = getattr(CFG, "timeout_s", 30.0)
