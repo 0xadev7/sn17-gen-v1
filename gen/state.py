@@ -81,7 +81,7 @@ class MinerState:
         tries: List[Dict] = []
         for i in range(self.t2i_max_tries):
             # Alternate around baseline minimally to keep SLA
-            steps = max(1, base_steps + (-1 if i % 2 == 0 else 1) * (i // 2))
+            steps = max(1, base_steps + (i % 2))
             tries.append(
                 {
                     "steps": steps,
