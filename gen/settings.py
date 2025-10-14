@@ -27,6 +27,11 @@ class Config:
 
     early_stop_score: float = float(os.getenv("EARLY_STOP_SCORE", 0.82))
     time_budget_s: float | None = float(os.getenv("TIME_BUDGET_S", 22))
+    
+    # Concurrency
+    queue_maxsize: int = int(os.getenv("QUEUE_MAXSIZE", 3))
+    t2i_concurrency: int = int(os.getenv("T2I_CONCURRENCY", 1))
+    trellis_concurrency: int = int(os.getenv("TRELLIS_CONCURRENCY", 1))
 
     # Text-to-2D parameters
     t2i_steps: int = int(os.getenv("T2I_STEPS", 2))
