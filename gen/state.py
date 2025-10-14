@@ -98,12 +98,8 @@ class MinerState:
         return tries
 
     async def _gen_one_image(self, prompt: str, params: dict):
-        # If FluxText2Image has a sync .generate_sync(...) use that instead
-        # img = await self._run_blocking(self.t2i.generate_sync, prompt, ...)
-
-        # Otherwise, push .generate itself to a thread. (Works if it's effectively sync inside.)
         img = await self._run_blocking(
-            self.t2i.generate,
+            self.t2i.generate_sync,
             prompt,
             steps=params["steps"],
             guidance=params["guidance"],

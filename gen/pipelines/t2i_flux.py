@@ -1,5 +1,7 @@
 from __future__ import annotations
 from typing import Optional
+import asyncio
+import threading
 import torch
 from diffusers import FluxPipeline
 from PIL import Image
@@ -15,6 +17,13 @@ class FluxText2Image:
         self.pipe.to(device)
         self.device = device
 
+        # Protect pipeline calls; Diffusers/CUDA aren’t safely concurrent per instance.
+        self._lock = threading.Lock()
+
+        # (Optional) small perf wins on repeated shapes
+        if torch.backends.cudnn.is_available():
+            torch.backends.cudnn.benchmark = True
+
     def tune_prompt(self, base_prompt: str) -> str:
         return (
             f"{base_prompt}, high quality 3D object photo, "
@@ -23,17 +32,32 @@ class FluxText2Image:
         )
 
     @torch.inference_mode()
-    async def generate(
-        self, prompt: str, steps: int, guidance: float, res: int, seed=0
+    def generate_sync(
+        self, prompt: str, steps: int, guidance: float, res: int, seed: int = 0
     ) -> Image.Image:
+        """Blocking generation (runs on CPU thread; safe to call inside to_thread)."""
         prompt = self.tune_prompt(prompt)
-        out = self.pipe(
-            prompt=prompt,
-            num_inference_steps=steps,
-            guidance_scale=guidance,
-            max_sequence_length=256,
-            generator=torch.Generator("cpu").manual_seed(seed),
-            height=res,
-            width=res,
-        )
+
+        # Ensure ops happen on the right CUDA device even if other threads are busy
+        with self._lock:
+            if self.device.type == "cuda":
+                torch.cuda.set_device(self.device)
+            gen = torch.Generator(device="cpu").manual_seed(seed)
+            out = self.pipe(
+                prompt=prompt,
+                num_inference_steps=steps,
+                guidance_scale=guidance,
+                max_sequence_length=256,
+                generator=gen,
+                height=res,
+                width=res,
+            )
         return out.images[0]
+
+    async def generate(
+        self, prompt: str, steps: int, guidance: float, res: int, seed: int = 0
+    ) -> Image.Image:
+        """Non-blocking wrapper suitable for asyncio pipelines."""
+        return await asyncio.to_thread(
+            self.generate_sync, prompt, steps, guidance, res, seed
+        )
