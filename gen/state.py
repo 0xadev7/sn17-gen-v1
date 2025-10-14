@@ -29,7 +29,7 @@ class MinerState:
 
         # Pipelines pinned to devices
         self.t2i = FluxText2Image(self.t2i_device)  # GPU0
-        self.bg_remover = BiRefNetRemover(self.aux_device)  # GPU1
+        self.bg_remover = BiRefNetRemover(self.t2i_device)  # GPU1
         self.trellis_img = TrellisImageTo3D(  # GPU1
             self.aux_device,
             cfg.trellis_struct_steps,
