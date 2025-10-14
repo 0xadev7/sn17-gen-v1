@@ -29,7 +29,7 @@ class MinerState:
 
         # Pipelines pinned to devices
         self.t2i = FluxText2Image(self.t2i_device)  # GPU0
-        self.bg_remover = BiRefNetRemover(self.t2i_device)  # GPU1
+        self.bg_remover = BiRefNetRemover(self.aux_device)  # GPU1
         self.trellis_img = TrellisImageTo3D(  # GPU1
             self.aux_device,
             cfg.trellis_struct_steps,
@@ -183,7 +183,7 @@ class MinerState:
     # -------------------------------------------------
     # Process 1 (GPU0): Flux + BG  ==> q01
     # -------------------------------------------------
-    async def _proc1_t2i_bg(self, prompt, q01, start_ts, stop_evt, prod_done_evt):
+    async def _proc1_t2i_bg(self, prompt, q01, start_ts, stop_evt):
         sem = asyncio.Semaphore(self.t2i_concurrency)
         tasks: List[asyncio.Task] = []
 
@@ -197,18 +197,8 @@ class MinerState:
                 if img is None:
                     return
 
-                if stop_evt.is_set() or not self._within_budget(start_ts):
-                    return
-                t1 = time.time()
-                fg = await self._bg_remove_one(img)
-                bg_sec = time.time() - t1
-                if fg is None:
-                    return
-
-                logger.debug(
-                    f"[GPU0/Proc1] T2I {t2i_sec:.2f}s + BG {bg_sec:.2f}s -> q01"
-                )
-                await q01.put((fg, iparams))
+                logger.debug(f"[GPU1/Proc1] T2I {t2i_sec:.2f}s -> q01")
+                await q01.put((img, iparams))
 
         try:
             for p in self._t2i_param_sweep():
@@ -219,7 +209,6 @@ class MinerState:
             for t in asyncio.as_completed(tasks):
                 await t
         finally:
-            prod_done_evt.set()  # signal "Process 1 finished"
             await q01.put(None)  # sentinel to Process 2
 
     # -------------------------------------------------
@@ -236,35 +225,42 @@ class MinerState:
                 await q12.put(None)
                 break
 
-            fg, iparams = item
+            img, iparams = item
+
+            t1 = time.time()
+            fg = await self._bg_remove_one(img)
+            bg_sec = time.time() - t1
+            if fg is None:
+                return
+
+            if stop_evt.is_set() or not self._within_budget(start_ts):
+                break
             tparams = self._trellis_param_sweep()[0]
             t0 = time.time()
             ply_bytes, _ = await self._trellis_one(fg, tparams)
             trellis_sec = time.time() - t0
 
             if not ply_bytes:
-                logger.debug("[GPU1/Proc2] Empty PLY; dropping.")
+                logger.debug("[GPU0/Proc2] Empty PLY; dropping.")
                 continue
 
-            logger.debug(f"[GPU1/Proc2] Trellis {trellis_sec:.2f}s -> q12")
+            logger.debug(
+                f"[GPU0/Proc2] Trellis {trellis_sec:.2f}s + BG {bg_sec:.2f}s -> q12"
+            )
             # Attach metadata for logging/inspection
             await q12.put((ply_bytes, {"iparams": iparams, "tparams": tparams}))
 
     # -------------------------------------------------
     # Process 3 (GPU0): Validate  q12 (starts ONLY after Proc1 finished)
     # -------------------------------------------------
-    async def _proc3_validate_after_proc1(
+    async def _proc3_validate(
         self,
         prompt: str,
         q12: asyncio.Queue,
-        prod_done_evt: asyncio.Event,
         start_ts: float,
         stop_evt: asyncio.Event,
         best_out: Dict[str, object],
     ):
-        # Wait for Process 1 to finish before starting validation (avoid GPU0 contention)
-        await prod_done_evt.wait()
-
         best_score = -1.0
         best_ply: bytes = b""
 
@@ -322,17 +318,12 @@ class MinerState:
         q01: asyncio.Queue = asyncio.Queue(maxsize=self.queue_maxsize)
         q12: asyncio.Queue = asyncio.Queue(maxsize=self.queue_maxsize)
         stop_evt = asyncio.Event()
-        prod_done_evt = asyncio.Event()
         best_out: Dict[str, object] = {}
 
-        proc1 = asyncio.create_task(
-            self._proc1_t2i_bg(prompt, q01, start_ts, stop_evt, prod_done_evt)
-        )
+        proc1 = asyncio.create_task(self._proc1_t2i_bg(prompt, q01, start_ts, stop_evt))
         proc2 = asyncio.create_task(self._proc2_trellis(q01, q12, start_ts, stop_evt))
         proc3 = asyncio.create_task(
-            self._proc3_validate_after_proc1(
-                prompt, q12, prod_done_evt, start_ts, stop_evt, best_out
-            )
+            self._proc3_validate(prompt, q12, start_ts, stop_evt, best_out)
         )
 
         try:
