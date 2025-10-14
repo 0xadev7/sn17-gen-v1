@@ -1,8 +1,6 @@
 from __future__ import annotations
 import base64
 from typing import Optional, Tuple
-import io
-
 import httpx
 from loguru import logger
 
@@ -25,7 +23,6 @@ class ExternalValidator:
         Sends base64 PLY to the external validator and returns (score, passed, raw_json).
         Uses the `score` field of ValidationResponse directly.
         """
-
         url = self.url_txt if mode == "text" else self.url_img
         payload = {
             "prompt": prompt,

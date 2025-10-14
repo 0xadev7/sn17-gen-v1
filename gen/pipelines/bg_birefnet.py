@@ -33,7 +33,7 @@ class BiRefNetRemover:
     @torch.inference_mode()
     def remove(self, img: Image.Image) -> Tuple[Image.Image, np.ndarray]:
         rgb = img.convert("RGB")
-        x = self.tfm(rgb).unsqueeze(0).to(self.device)
+        x = self.tfm(rgb).unsqueeze(0).to(self.device, non_blocking=True)
         if self.device.type == "cuda":
             x = x.half()
 

@@ -36,8 +36,7 @@ async def lifespan(app: FastAPI):
 
     yield
 
-    # Graceful shutdown (if you keep any pools/clients, close them here)
-    # e.g., await STATE.aclose() if implemented
+    # If you add pooled resources later, close them here.
 
 
 app = FastAPI(lifespan=lifespan)
@@ -80,7 +79,6 @@ async def generate(
             assert prompt is not None and prompt.strip(), "Empty text prompt"
             return await STATE.text_to_ply(prompt.strip())
 
-    # Fallback to 30s if your Config doesn’t define timeout_s
     timeout_s = getattr(CFG, "timeout_s", 30.0)
 
     try:
@@ -103,10 +101,8 @@ async def generate(
 
 
 if __name__ == "__main__":
-    import os
     import uvicorn
 
-    # Prefer env vars, fall back to Config()
     host = os.getenv("HOST", "0.0.0.0")
     try:
         port = int(os.getenv("PORT", str(CFG.port)))

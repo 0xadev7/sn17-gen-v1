@@ -26,7 +26,7 @@ class TrellisImageTo3D:
         self.cfg_slat = cfg_slat
 
     @torch.inference_mode()
-    async def infer_to_ply(
+    def infer_to_ply(
         self,
         image: Image.Image,
         struct_steps: Optional[int] = None,
@@ -35,6 +35,10 @@ class TrellisImageTo3D:
         cfg_slat: Optional[float] = None,
         seed: Optional[int] = None,
     ) -> bytes:
+        """
+        Synchronous (blocking) call. We run this inside a worker thread
+        via asyncio.to_thread to keep the event loop free.
+        """
         outputs = self.pipe.run(
             image,
             seed=seed if seed is not None else 1,

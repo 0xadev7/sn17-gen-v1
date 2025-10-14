@@ -3,11 +3,10 @@ import base64
 import io
 from typing import Dict, Tuple, Optional, List
 from loguru import logger
-import asyncio, time, random
+import asyncio, time, random, functools
 import numpy as np
 import torch
 from PIL import Image
-import functools
 
 from gen.settings import Config
 from gen.pipelines.t2i_flux import FluxText2Image
@@ -20,7 +19,7 @@ class MinerState:
     def __init__(self, cfg: Config):
         self.cfg = cfg
 
-        # Devices (configure via env: T2I_GPU_ID, AUX_GPU_ID)
+        # Devices (A40 x2)
         if torch.cuda.is_available():
             self.t2i_device = torch.device(f"cuda:{cfg.t2i_gpu_id}")
             self.aux_device = torch.device(f"cuda:{cfg.aux_gpu_id}")
@@ -29,6 +28,7 @@ class MinerState:
             self.aux_device = torch.device("cpu")
 
         # Pipelines on dedicated GPUs
+        # Keep BG remover on the same GPU as T2I to avoid H<->D transfers.
         self.t2i = FluxText2Image(self.t2i_device)
         self.bg_remover = BiRefNetRemover(self.t2i_device)
         self.trellis_img = TrellisImageTo3D(
@@ -44,7 +44,7 @@ class MinerState:
             cfg.validator_url_txt, cfg.validator_url_img, cfg.vld_threshold
         )
 
-        # Retry/budget knobs...
+        # Knobs
         self.t2i_max_tries: int = getattr(cfg, "t2i_max_tries", 3)
         self.trellis_max_tries: int = getattr(cfg, "trellis_max_tries", 1)
         self.early_stop_score: float = getattr(
@@ -52,14 +52,9 @@ class MinerState:
         )
         self.time_budget_s: Optional[float] = getattr(cfg, "time_budget_s", None)
 
-        # Streaming & concurrency knobs (optional envs; safe defaults)
         self.queue_maxsize: int = int(getattr(cfg, "queue_maxsize", 3))
-        self.t2i_concurrency: int = int(
-            getattr(cfg, "t2i_concurrency", 1)
-        )  # avoid thrash
-        self.trellis_concurrency: int = int(
-            getattr(cfg, "trellis_concurrency", 1)
-        )  # usually 1 per GPU
+        self.t2i_concurrency: int = int(getattr(cfg, "t2i_concurrency", 1))
+        self.trellis_concurrency: int = int(getattr(cfg, "trellis_concurrency", 1))
         self.debug_save: bool = bool(getattr(cfg, "debug_save", False))
 
         logger.info(
@@ -71,7 +66,6 @@ class MinerState:
     # ---------------------------
 
     async def _run_blocking(self, fn, *args, **kwargs):
-        # Runs sync/blocking work off the event loop
         return await asyncio.to_thread(functools.partial(fn, *args, **kwargs))
 
     def _t2i_param_sweep(self) -> List[Dict]:
@@ -85,8 +79,7 @@ class MinerState:
 
         tries: List[Dict] = []
         for i in range(self.t2i_max_tries):
-            # Alternate around baseline minimally to keep SLA
-            steps = max(1, base_steps + (i % 2))
+            steps = max(1, base_steps + (i % 2))  # alternate 2/3 if base=2
             tries.append(
                 {
                     "steps": steps,
@@ -97,22 +90,56 @@ class MinerState:
             )
         return tries
 
+    def _trellis_param_sweep(self) -> List[Dict]:
+        # Keep it simple/fast; add jitter if needed later.
+        params = []
+        for _ in range(max(1, self.trellis_max_tries)):
+            params.append(
+                {
+                    "struct_steps": self.cfg.trellis_struct_steps,
+                    "slat_steps": self.cfg.trellis_slat_steps,
+                    "cfg_struct": self.cfg.trellis_cfg_struct,
+                    "cfg_slat": self.cfg.trellis_cfg_slat,
+                    "seed": random.randint(0, 2**31 - 1),
+                }
+            )
+        return params
+
     async def _gen_one_image(self, prompt: str, params: dict):
-        img = await self._run_blocking(
-            self.t2i.generate_sync,
-            prompt,
-            steps=params["steps"],
-            guidance=params["guidance"],
-            res=params["res"],
-            seed=params["seed"],
-        )
+        try:
+            img = await self._run_blocking(
+                self.t2i.generate_sync,
+                prompt,
+                steps=params["steps"],
+                guidance=params["guidance"],
+                res=params["res"],
+                seed=params["seed"],
+            )
+        except RuntimeError as e:
+            # Handle CUDA OOM gracefully to keep pipeline alive
+            if "out of memory" in str(e).lower():
+                logger.warning("[GPU0] Flux OOM; clearing cache and skipping one try.")
+                if self.t2i_device.type == "cuda":
+                    with torch.cuda.device(self.t2i_device):
+                        torch.cuda.empty_cache()
+                return None, params
+            raise
         return img, params
 
-    async def _bg_remove_one(self, pil_image: Image.Image) -> Image.Image:
-        fg, _ = await self._run_blocking(self.bg_remover.remove, pil_image)
-        return fg
+    async def _bg_remove_one(self, pil_image: Image.Image) -> Image.Image | None:
+        try:
+            fg, _ = await self._run_blocking(self.bg_remover.remove, pil_image)
+            return fg
+        except RuntimeError as e:
+            if "out of memory" in str(e).lower():
+                logger.warning("[GPU0] BiRefNet OOM; clearing cache and dropping item.")
+                if self.t2i_device.type == "cuda":
+                    with torch.cuda.device(self.t2i_device):
+                        torch.cuda.empty_cache()
+                return None
+            raise
 
-    async def _trellis_one(self, pil_image, params: dict):
+    async def _trellis_one(self, pil_image, params: dict) -> Tuple[bytes, dict]:
         seed = params.get("seed")
         try:
             ply_bytes = await self._run_blocking(
@@ -124,9 +151,18 @@ class MinerState:
                 cfg_slat=params["cfg_slat"],
                 seed=seed,
             )
+        except RuntimeError as e:
+            if "out of memory" in str(e).lower():
+                logger.warning("[GPU1] Trellis OOM; clearing cache and skipping result.")
+                if self.aux_device.type == "cuda":
+                    with torch.cuda.device(self.aux_device):
+                        torch.cuda.empty_cache()
+                return b"", params
+            logger.error(f"Trellis runtime error: {e}")
+            return b"", params
         except Exception as e:
             logger.error(f"Trellis error: {e}")
-            ply_bytes = b""
+            return b"", params
         return ply_bytes, params
 
     def _within_budget(self, start_ts: float) -> bool:
@@ -135,11 +171,11 @@ class MinerState:
         return (time.time() - start_ts) < self.time_budget_s
 
     # ---------------------------
-    # Producer-Consumer workers
+    # Producer (GPU0) : T2I -> BG
     # ---------------------------
     async def _producer_t2i_bg(self, prompt, q, start_ts, stop_evt):
         sem = asyncio.Semaphore(self.t2i_concurrency)
-        tasks = []
+        tasks: List[asyncio.Task] = []
 
         async def _one(params: dict):
             async with sem:
@@ -148,13 +184,19 @@ class MinerState:
                 t0 = time.time()
                 img, iparams = await self._gen_one_image(prompt, params)
                 t2i_sec = time.time() - t0
+                if img is None:
+                    return
+
                 if stop_evt.is_set() or not self._within_budget(start_ts):
                     return
                 t1 = time.time()
                 fg = await self._bg_remove_one(img)
                 bg_sec = time.time() - t1
+                if fg is None:
+                    return
+
                 logger.debug(f"[GPU0] T2I {t2i_sec:.2f}s + BG {bg_sec:.2f}s -> queued")
-                await q.put((fg, iparams))  # may backpressure if full
+                await q.put((fg, iparams))  # bounded; backpressures if full
 
         try:
             for p in self._t2i_param_sweep():
@@ -162,14 +204,16 @@ class MinerState:
                     break
                 tasks.append(asyncio.create_task(_one(p)))
 
-            # As soon as the first item is ready, consumer can start pulling it.
-            # We still wait here for producer tasks to finish in the background;
-            # the consumer is running concurrently on the same loop.
+            # Let items flow to consumer as they complete.
             for t in asyncio.as_completed(tasks):
                 await t
         finally:
-            await q.put(None)  # sentinel
+            # Signal completion
+            await q.put(None)
 
+    # ---------------------------
+    # Consumer (GPU1) : Trellis -> Validate
+    # ---------------------------
     async def _consumer_trellis_validate(
         self,
         prompt: str,
@@ -178,18 +222,12 @@ class MinerState:
         stop_evt: asyncio.Event,
         best_out: Dict[str, object],
     ):
-        """
-        GPU1 consumer:
-        - pulls foreground images
-        - runs trellis (+ optional param sweep)
-        - validates
-        - tracks best result
-        Supports early stop and time budget.
-        """
-        # Track best locally; then store in best_out
         best_score = -1.0
         best_ply: bytes = b""
 
+        # Optional: If you ever bump trellis_concurrency > 1, you can run multiple
+        # workers here pulling from the same queue. With a single A40 for Trellis,
+        # keep it at 1 to avoid OOM.
         while True:
             if stop_evt.is_set():
                 break
@@ -199,18 +237,10 @@ class MinerState:
 
             item = await q.get()
             if item is None:
-                # Producer done
-                break
+                break  # producer done
 
             fg, iparams = item
-
-            tparams = {
-                "struct_steps": self.cfg.trellis_struct_steps,
-                "slat_steps": self.cfg.trellis_slat_steps,
-                "cfg_struct": self.cfg.trellis_cfg_struct,
-                "cfg_slat": self.cfg.trellis_cfg_slat,
-                "seed": random.randint(0, 2**31 - 1),
-            }
+            tparams = self._trellis_param_sweep()[0]
 
             if stop_evt.is_set() or not self._within_budget(start_ts):
                 break
@@ -240,21 +270,17 @@ class MinerState:
                 logger.info(
                     f"[text] Early-stop at score {score:.4f} >= {self.early_stop_score:.4f}"
                 )
-                # Save and signal stop
                 best_out["ply"] = ply_bytes if passed else b""
                 best_out["score"] = score
                 stop_evt.set()
                 return
 
-            # loop back to the queue for next item
-
-        # Save whatever is best so far (respect threshold)
         final_pass = best_score >= self.cfg.vld_threshold
         best_out["ply"] = best_ply if final_pass else b""
         best_out["score"] = max(0.0, best_score)
 
     # ---------------------------
-    # Public APIs (streaming)
+    # Public APIs
     # ---------------------------
 
     async def text_to_ply(self, prompt: str) -> Tuple[bytes, float]:
@@ -268,7 +294,6 @@ class MinerState:
         stop_evt = asyncio.Event()
         best_out: Dict[str, object] = {}
 
-        # Kick off producer and consumer
         producer_task = asyncio.create_task(
             self._producer_t2i_bg(prompt, q, start_ts, stop_evt)
         )
@@ -279,7 +304,7 @@ class MinerState:
         try:
             await asyncio.gather(producer_task, consumer_task)
         finally:
-            # Drain queue if anything left and ensure sentinel consumed
+            # Drain queue to avoid lingering refs
             try:
                 while not q.empty():
                     _ = q.get_nowait()
@@ -292,8 +317,7 @@ class MinerState:
 
     async def image_to_ply(self, image_b64) -> Tuple[bytes, float]:
         """
-        Image mode stays sequential per image (BG → Trellis → validate),
-        since there's a single input. You could stream across multiple inputs at caller level.
+        Image mode stays sequential per image (BG → Trellis → validate).
         """
         start_ts = time.time()
 
@@ -303,7 +327,6 @@ class MinerState:
             raw = base64.b64decode(image_b64 or "")
         pil_image = Image.open(io.BytesIO(raw)).convert("RGBA")
 
-        # BG removal on GPU0 (as requested)
         fg, _ = self.bg_remover.remove(pil_image)
 
         best_score = -1.0

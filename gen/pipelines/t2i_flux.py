@@ -24,11 +24,17 @@ class FluxText2Image:
         if torch.backends.cudnn.is_available():
             torch.backends.cudnn.benchmark = True
 
+        # Reduce peak memory a bit
+        try:
+            self.pipe.enable_attention_slicing()
+        except Exception:
+            pass
+
     def tune_prompt(self, base_prompt: str) -> str:
         return (
             f"{base_prompt}, high quality 3D object photo, "
             "on a contrasting neutral background, "
-            "studio lighting, sharp focus, centered composition, "
+            "studio lighting, sharp focus, centered composition"
         )
 
     @torch.inference_mode()
