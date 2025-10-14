@@ -7,6 +7,7 @@ import asyncio, time, random
 import numpy as np
 import torch
 from PIL import Image
+import functools
 
 from gen.settings import Config
 from gen.pipelines.t2i_flux import FluxText2Image
@@ -69,6 +70,10 @@ class MinerState:
     # Internal helpers
     # ---------------------------
 
+    async def _run_blocking(self, fn, *args, **kwargs):
+        # Runs sync/blocking work off the event loop
+        return await asyncio.to_thread(functools.partial(fn, *args, **kwargs))
+
     def _t2i_param_sweep(self) -> List[Dict]:
         """
         Sweep T2I parameters across retry attempts.
@@ -92,43 +97,13 @@ class MinerState:
             )
         return tries
 
-    def _trellis_param_sweep(self) -> List[Dict]:
-        """
-        Simple sweep; by default just 1 try (config driven).
-        If trellis_max_tries > 1, jitter steps a little.
-        """
-        base_struct = self.cfg.trellis_struct_steps
-        base_slat = self.cfg.trellis_slat_steps
-        base_cfg_struct = self.cfg.trellis_cfg_struct
-        base_cfg_slat = self.cfg.trellis_cfg_slat
-
-        tries: List[Dict] = []
-        for i in range(self.trellis_max_tries):
-            struct_steps = max(1, base_struct + (i % 2) - ((i + 1) % 2))
-            slat_steps = max(1, base_slat + ((i + 1) % 2) - (i % 2))
-            tries.append(
-                {
-                    "struct_steps": struct_steps,
-                    "slat_steps": slat_steps,
-                    "cfg_struct": base_cfg_struct,
-                    "cfg_slat": base_cfg_slat,
-                    "seed": random.randint(0, 2**31 - 1),
-                }
-            )
-        if not tries:
-            tries.append(
-                {
-                    "struct_steps": base_struct,
-                    "slat_steps": base_slat,
-                    "cfg_struct": base_cfg_struct,
-                    "cfg_slat": base_cfg_slat,
-                    "seed": random.randint(0, 2**31 - 1),
-                }
-            )
-        return tries
-
     async def _gen_one_image(self, prompt: str, params: dict):
-        img = await self.t2i.generate(
+        # If FluxText2Image has a sync .generate_sync(...) use that instead
+        # img = await self._run_blocking(self.t2i.generate_sync, prompt, ...)
+
+        # Otherwise, push .generate itself to a thread. (Works if it's effectively sync inside.)
+        img = await self._run_blocking(
+            self.t2i.generate,
             prompt,
             steps=params["steps"],
             guidance=params["guidance"],
@@ -138,14 +113,14 @@ class MinerState:
         return img, params
 
     async def _bg_remove_one(self, pil_image: Image.Image) -> Image.Image:
-        # BiRefNetRemover returns (fg, mask) — we only need fg
-        fg, _ = self.bg_remover.remove(pil_image)
+        fg, _ = await self._run_blocking(self.bg_remover.remove, pil_image)
         return fg
 
     async def _trellis_one(self, pil_image, params: dict):
         seed = params.get("seed")
         try:
-            ply_bytes = await self.trellis_img.infer_to_ply(
+            ply_bytes = await self._run_blocking(
+                self.trellis_img.infer_to_ply,
                 pil_image,
                 struct_steps=params["struct_steps"],
                 slat_steps=params["slat_steps"],
@@ -166,22 +141,9 @@ class MinerState:
     # ---------------------------
     # Producer-Consumer workers
     # ---------------------------
-
-    async def _producer_t2i_bg(
-        self,
-        prompt: str,
-        q: asyncio.Queue,
-        start_ts: float,
-        stop_evt: asyncio.Event,
-    ):
-        """
-        GPU0 producer:
-        - generates images
-        - removes background
-        - streams foreground images to queue
-        Stops early if budget exceeded or stop_evt is set.
-        """
+    async def _producer_t2i_bg(self, prompt, q, start_ts, stop_evt):
         sem = asyncio.Semaphore(self.t2i_concurrency)
+        tasks = []
 
         async def _one(params: dict):
             async with sem:
@@ -196,17 +158,21 @@ class MinerState:
                 fg = await self._bg_remove_one(img)
                 bg_sec = time.time() - t1
                 logger.debug(f"[GPU0] T2I {t2i_sec:.2f}s + BG {bg_sec:.2f}s -> queued")
-                # Backpressure: wait if queue is full
-                await q.put((fg, iparams))
+                await q.put((fg, iparams))  # may backpressure if full
 
         try:
             for p in self._t2i_param_sweep():
                 if stop_evt.is_set() or not self._within_budget(start_ts):
                     break
-                await _one(p)
+                tasks.append(asyncio.create_task(_one(p)))
+
+            # As soon as the first item is ready, consumer can start pulling it.
+            # We still wait here for producer tasks to finish in the background;
+            # the consumer is running concurrently on the same loop.
+            for t in asyncio.as_completed(tasks):
+                await t
         finally:
-            # Signal completion
-            await q.put(None)
+            await q.put(None)  # sentinel
 
     async def _consumer_trellis_validate(
         self,
@@ -242,39 +208,47 @@ class MinerState:
 
             fg, iparams = item
 
-            # Try one or more Trellis params (usually one, config-driven)
-            for tparams in self._trellis_param_sweep():
-                if stop_evt.is_set() or not self._within_budget(start_ts):
-                    break
+            tparams = {
+                "struct_steps": self.cfg.trellis_struct_steps,
+                "slat_steps": self.cfg.trellis_slat_steps,
+                "cfg_struct": self.cfg.trellis_cfg_struct,
+                "cfg_slat": self.cfg.trellis_cfg_slat,
+                "seed": random.randint(0, 2**31 - 1),
+            }
 
-                t0 = time.time()
-                ply_bytes, _ = await self._trellis_one(fg, tparams)
-                trellis_sec = time.time() - t0
+            if stop_evt.is_set() or not self._within_budget(start_ts):
+                break
 
-                if not ply_bytes:
-                    logger.debug("[GPU1] Empty PLY from Trellis; skipping validation.")
-                    continue
+            t0 = time.time()
+            ply_bytes, _ = await self._trellis_one(fg, tparams)
+            trellis_sec = time.time() - t0
 
-                v0 = time.time()
-                score, passed, _ = await self.validator.validate_text(prompt, ply_bytes)
-                vsec = time.time() - v0
+            if not ply_bytes:
+                logger.debug("[GPU1] Empty PLY from Trellis; skipping validation.")
+                continue
+
+            v0 = time.time()
+            score, passed, _ = await self._run_blocking(
+                self.validator.validate_text, prompt, ply_bytes
+            )
+            vsec = time.time() - v0
+            logger.info(
+                f"[text] T2I{iparams}|TRELLIS{tparams} -> score={score:.4f}, passed={passed} "
+                f"(trellis {trellis_sec:.2f}s, validate {vsec:.2f}s)"
+            )
+
+            if score > best_score:
+                best_score, best_ply = score, ply_bytes
+
+            if score >= self.early_stop_score:
                 logger.info(
-                    f"[text] T2I{iparams}|TRELLIS{tparams} -> score={score:.4f}, passed={passed} "
-                    f"(trellis {trellis_sec:.2f}s, validate {vsec:.2f}s)"
+                    f"[text] Early-stop at score {score:.4f} >= {self.early_stop_score:.4f}"
                 )
-
-                if score > best_score:
-                    best_score, best_ply = score, ply_bytes
-
-                if score >= self.early_stop_score:
-                    logger.info(
-                        f"[text] Early-stop at score {score:.4f} >= {self.early_stop_score:.4f}"
-                    )
-                    # Save and signal stop
-                    best_out["ply"] = ply_bytes if passed else b""
-                    best_out["score"] = score
-                    stop_evt.set()
-                    return
+                # Save and signal stop
+                best_out["ply"] = ply_bytes if passed else b""
+                best_out["score"] = score
+                stop_evt.set()
+                return
 
             # loop back to the queue for next item
 
