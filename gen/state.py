@@ -21,17 +21,16 @@ class MinerState:
 
         # Devices (A40 x2)
         if torch.cuda.is_available():
-            self.t2i_device = torch.device(f"cuda:{cfg.t2i_gpu_id}")
-            self.aux_device = torch.device(f"cuda:{cfg.aux_gpu_id}")
+            self.t2i_device = torch.device(f"cuda:{cfg.t2i_gpu_id}")  # GPU0
+            self.aux_device = torch.device(f"cuda:{cfg.aux_gpu_id}")  # GPU1
         else:
             self.t2i_device = torch.device("cpu")
             self.aux_device = torch.device("cpu")
 
-        # Pipelines on dedicated GPUs
-        # Keep BG remover on the same GPU as T2I to avoid H<->D transfers.
-        self.t2i = FluxText2Image(self.t2i_device)
-        self.bg_remover = BiRefNetRemover(self.t2i_device)
-        self.trellis_img = TrellisImageTo3D(
+        # Pipelines pinned to devices
+        self.t2i = FluxText2Image(self.t2i_device)  # GPU0
+        self.bg_remover = BiRefNetRemover(self.t2i_device)  # GPU0
+        self.trellis_img = TrellisImageTo3D(  # GPU1
             self.aux_device,
             cfg.trellis_struct_steps,
             cfg.trellis_slat_steps,
@@ -39,7 +38,7 @@ class MinerState:
             cfg.trellis_cfg_slat,
         )
 
-        # Validators (HTTP)
+        # External validator (your validator may use GPU0 internally)
         self.validator = ExternalValidator(
             cfg.validator_url_txt, cfg.validator_url_img, cfg.vld_threshold
         )
@@ -52,34 +51,33 @@ class MinerState:
         )
         self.time_budget_s: Optional[float] = getattr(cfg, "time_budget_s", None)
 
-        self.queue_maxsize: int = int(getattr(cfg, "queue_maxsize", 3))
-        self.t2i_concurrency: int = int(getattr(cfg, "t2i_concurrency", 1))
-        self.trellis_concurrency: int = int(getattr(cfg, "trellis_concurrency", 1))
+        self.queue_maxsize: int = int(getattr(cfg, "queue_maxsize", 4))
+        self.t2i_concurrency: int = int(getattr(cfg, "t2i_concurrency", 1))  # GPU0
+        self.trellis_concurrency: int = int(
+            getattr(cfg, "trellis_concurrency", 1)
+        )  # GPU1
         self.debug_save: bool = bool(getattr(cfg, "debug_save", False))
 
         logger.info(
-            f"Models loaded. T2I+BG on {self.t2i_device}, Trellis on {self.aux_device}."
+            f"Models loaded. [GPU0] Flux+BG (+Validator) on {self.t2i_device}, "
+            f"[GPU1] Trellis on {self.aux_device}."
         )
 
     # ---------------------------
-    # Internal helpers
+    # Helpers
     # ---------------------------
 
     async def _run_blocking(self, fn, *args, **kwargs):
         return await asyncio.to_thread(functools.partial(fn, *args, **kwargs))
 
     def _t2i_param_sweep(self) -> List[Dict]:
-        """
-        Sweep T2I parameters across retry attempts.
-        Baseline first, then slight jitter on steps and random seeds.
-        """
         base_steps = self.cfg.t2i_steps
         base_guidance = self.cfg.t2i_guidance
         base_res = self.cfg.t2i_res
 
         tries: List[Dict] = []
         for i in range(self.t2i_max_tries):
-            steps = max(1, base_steps + (i % 2))  # alternate 2/3 if base=2
+            steps = max(1, base_steps + (i % 2))  # 2/3 steps alternation
             tries.append(
                 {
                     "steps": steps,
@@ -91,7 +89,6 @@ class MinerState:
         return tries
 
     def _trellis_param_sweep(self) -> List[Dict]:
-        # Keep it simple/fast; add jitter if needed later.
         params = []
         for _ in range(max(1, self.trellis_max_tries)):
             params.append(
@@ -116,7 +113,6 @@ class MinerState:
                 seed=params["seed"],
             )
         except RuntimeError as e:
-            # Handle CUDA OOM gracefully to keep pipeline alive
             if "out of memory" in str(e).lower():
                 logger.warning("[GPU0] Flux OOM; clearing cache and skipping one try.")
                 if self.t2i_device.type == "cuda":
@@ -153,7 +149,7 @@ class MinerState:
             )
         except RuntimeError as e:
             if "out of memory" in str(e).lower():
-                logger.warning("[GPU1] Trellis OOM; clearing cache and skipping result.")
+                logger.warning("[GPU1] Trellis OOM; clearing cache.")
                 if self.aux_device.type == "cuda":
                     with torch.cuda.device(self.aux_device):
                         torch.cuda.empty_cache()
@@ -170,10 +166,10 @@ class MinerState:
             return True
         return (time.time() - start_ts) < self.time_budget_s
 
-    # ---------------------------
-    # Producer (GPU0) : T2I -> BG
-    # ---------------------------
-    async def _producer_t2i_bg(self, prompt, q, start_ts, stop_evt):
+    # -------------------------------------------------
+    # Process 1 (GPU0): Flux + BG  ==> q01
+    # -------------------------------------------------
+    async def _proc1_t2i_bg(self, prompt, q01, start_ts, stop_evt, prod_done_evt):
         sem = asyncio.Semaphore(self.t2i_concurrency)
         tasks: List[asyncio.Task] = []
 
@@ -195,8 +191,10 @@ class MinerState:
                 if fg is None:
                     return
 
-                logger.debug(f"[GPU0] T2I {t2i_sec:.2f}s + BG {bg_sec:.2f}s -> queued")
-                await q.put((fg, iparams))  # bounded; backpressures if full
+                logger.debug(
+                    f"[GPU0/Proc1] T2I {t2i_sec:.2f}s + BG {bg_sec:.2f}s -> q01"
+                )
+                await q01.put((fg, iparams))
 
         try:
             for p in self._t2i_param_sweep():
@@ -204,63 +202,78 @@ class MinerState:
                     break
                 tasks.append(asyncio.create_task(_one(p)))
 
-            # Let items flow to consumer as they complete.
             for t in asyncio.as_completed(tasks):
                 await t
         finally:
-            # Signal completion
-            await q.put(None)
+            prod_done_evt.set()  # signal "Process 1 finished"
+            await q01.put(None)  # sentinel to Process 2
 
-    # ---------------------------
-    # Consumer (GPU1) : Trellis -> Validate
-    # ---------------------------
-    async def _consumer_trellis_validate(
-        self,
-        prompt: str,
-        q: asyncio.Queue,
-        start_ts: float,
-        stop_evt: asyncio.Event,
-        best_out: Dict[str, object],
-    ):
-        best_score = -1.0
-        best_ply: bytes = b""
-
-        # Optional: If you ever bump trellis_concurrency > 1, you can run multiple
-        # workers here pulling from the same queue. With a single A40 for Trellis,
-        # keep it at 1 to avoid OOM.
+    # -------------------------------------------------
+    # Process 2 (GPU1): Trellis   q01 ==> q12
+    # -------------------------------------------------
+    async def _proc2_trellis(self, q01, q12, start_ts, stop_evt):
+        # single-worker default; bump if VRAM allows (careful!)
         while True:
-            if stop_evt.is_set():
+            if stop_evt.is_set() or not self._within_budget(start_ts):
                 break
-            if not self._within_budget(start_ts):
-                logger.warning("[GPU1] Budget exhausted; stopping consumer.")
-                break
-
-            item = await q.get()
+            item = await q01.get()
             if item is None:
-                break  # producer done
+                # propagate sentinel downstream
+                await q12.put(None)
+                break
 
             fg, iparams = item
             tparams = self._trellis_param_sweep()[0]
-
-            if stop_evt.is_set() or not self._within_budget(start_ts):
-                break
-
             t0 = time.time()
             ply_bytes, _ = await self._trellis_one(fg, tparams)
             trellis_sec = time.time() - t0
 
             if not ply_bytes:
-                logger.debug("[GPU1] Empty PLY from Trellis; skipping validation.")
+                logger.debug("[GPU1/Proc2] Empty PLY; dropping.")
                 continue
 
+            logger.debug(f"[GPU1/Proc2] Trellis {trellis_sec:.2f}s -> q12")
+            # Attach metadata for logging/inspection
+            await q12.put((ply_bytes, {"iparams": iparams, "tparams": tparams}))
+
+    # -------------------------------------------------
+    # Process 3 (GPU0): Validate  q12 (starts ONLY after Proc1 finished)
+    # -------------------------------------------------
+    async def _proc3_validate_after_proc1(
+        self,
+        prompt: str,
+        q12: asyncio.Queue,
+        prod_done_evt: asyncio.Event,
+        start_ts: float,
+        stop_evt: asyncio.Event,
+        best_out: Dict[str, object],
+    ):
+        # Wait for Process 1 to finish before starting validation (avoid GPU0 contention)
+        await prod_done_evt.wait()
+
+        best_score = -1.0
+        best_ply: bytes = b""
+
+        while True:
+            if stop_evt.is_set() or not self._within_budget(start_ts):
+                break
+
+            item = await q12.get()
+            if item is None:
+                break  # Process 2 finished and propagated sentinel
+
+            ply_bytes, meta = item
+            iparams = meta.get("iparams", {})
+            tparams = meta.get("tparams", {})
+
             v0 = time.time()
-            score, passed, _ = await self._run_blocking(
-                self.validator.validate_text, prompt, ply_bytes
-            )
+            # If your validator uses GPU0, this now runs with GPU0 free of Flux/BG.
+            score, passed, _ = await self.validator.validate_text(prompt, ply_bytes)
+
             vsec = time.time() - v0
             logger.info(
-                f"[text] T2I{iparams}|TRELLIS{tparams} -> score={score:.4f}, passed={passed} "
-                f"(trellis {trellis_sec:.2f}s, validate {vsec:.2f}s)"
+                f"[Proc3/validate] T2I{iparams}|TRELLIS{tparams} -> score={score:.4f}, "
+                f"passed={passed} (validate {vsec:.2f}s)"
             )
 
             if score > best_score:
@@ -268,16 +281,17 @@ class MinerState:
 
             if score >= self.early_stop_score:
                 logger.info(
-                    f"[text] Early-stop at score {score:.4f} >= {self.early_stop_score:.4f}"
+                    f"[Proc3] Early-stop at score {score:.4f} >= {self.early_stop_score:.4f}"
                 )
                 best_out["ply"] = ply_bytes if passed else b""
                 best_out["score"] = score
                 stop_evt.set()
-                return
+                # We won’t cancel Trellis actively; queue will drain to sentinel.
+                break
 
         final_pass = best_score >= self.cfg.vld_threshold
-        best_out["ply"] = best_ply if final_pass else b""
-        best_out["score"] = max(0.0, best_score)
+        best_out.setdefault("ply", best_ply if final_pass else b"")
+        best_out.setdefault("score", max(0.0, best_score))
 
     # ---------------------------
     # Public APIs
@@ -285,31 +299,38 @@ class MinerState:
 
     async def text_to_ply(self, prompt: str) -> Tuple[bytes, float]:
         """
-        Streaming two-stage pipeline (GPU0 → GPU1):
-          - GPU0: T2I + BG, push to queue as soon as ready
-          - GPU1: Trellis + validate, early-stop possible
+        3-stage pipeline with two queues:
+          Proc1 [GPU0]: T2I+BG -> q01 (signals prod_done when finished)
+          Proc2 [GPU1]: Trellis consumes q01 -> q12
+          Proc3 [GPU0]: waits for prod_done, then validates items from q12
         """
         start_ts = time.time()
-        q: asyncio.Queue = asyncio.Queue(maxsize=self.queue_maxsize)
+        q01: asyncio.Queue = asyncio.Queue(maxsize=self.queue_maxsize)
+        q12: asyncio.Queue = asyncio.Queue(maxsize=self.queue_maxsize)
         stop_evt = asyncio.Event()
+        prod_done_evt = asyncio.Event()
         best_out: Dict[str, object] = {}
 
-        producer_task = asyncio.create_task(
-            self._producer_t2i_bg(prompt, q, start_ts, stop_evt)
+        proc1 = asyncio.create_task(
+            self._proc1_t2i_bg(prompt, q01, start_ts, stop_evt, prod_done_evt)
         )
-        consumer_task = asyncio.create_task(
-            self._consumer_trellis_validate(prompt, q, start_ts, stop_evt, best_out)
+        proc2 = asyncio.create_task(self._proc2_trellis(q01, q12, start_ts, stop_evt))
+        proc3 = asyncio.create_task(
+            self._proc3_validate_after_proc1(
+                prompt, q12, prod_done_evt, start_ts, stop_evt, best_out
+            )
         )
 
         try:
-            await asyncio.gather(producer_task, consumer_task)
+            await asyncio.gather(proc1, proc2, proc3)
         finally:
-            # Drain queue to avoid lingering refs
-            try:
-                while not q.empty():
-                    _ = q.get_nowait()
-            except Exception:
-                pass
+            # Drain any leftover items
+            for q in (q01, q12):
+                try:
+                    while not q.empty():
+                        _ = q.get_nowait()
+                except Exception:
+                    pass
 
         ply_bytes: bytes = best_out.get("ply", b"")  # type: ignore
         score: float = float(best_out.get("score", 0.0))  # type: ignore
@@ -317,7 +338,7 @@ class MinerState:
 
     async def image_to_ply(self, image_b64) -> Tuple[bytes, float]:
         """
-        Image mode stays sequential per image (BG → Trellis → validate).
+        Image mode remains sequential per image.
         """
         start_ts = time.time()
 
@@ -327,6 +348,7 @@ class MinerState:
             raw = base64.b64decode(image_b64 or "")
         pil_image = Image.open(io.BytesIO(raw)).convert("RGBA")
 
+        # BG removal on GPU0
         fg, _ = self.bg_remover.remove(pil_image)
 
         best_score = -1.0
