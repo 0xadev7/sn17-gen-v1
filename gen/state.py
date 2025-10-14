@@ -70,6 +70,13 @@ class MinerState:
     async def _run_blocking(self, fn, *args, **kwargs):
         return await asyncio.to_thread(functools.partial(fn, *args, **kwargs))
 
+    def _log_cuda(self, message: str, device: torch.device):
+        logger.warning(f"[{device}] {message}")
+        if device.type == "cuda":
+            with torch.cuda.device(device):
+                torch.cuda.empty_cache()
+                torch.cuda.ipc_collect()
+
     def _t2i_param_sweep(self) -> List[Dict]:
         base_steps = self.cfg.t2i_steps
         base_guidance = self.cfg.t2i_guidance
@@ -135,31 +142,33 @@ class MinerState:
                 return None
             raise
 
-    async def _trellis_one(self, pil_image, params: dict) -> Tuple[bytes, dict]:
-        seed = params.get("seed")
-        try:
-            ply_bytes = await self._run_blocking(
-                self.trellis_img.infer_to_ply,
-                pil_image,
-                struct_steps=params["struct_steps"],
-                slat_steps=params["slat_steps"],
-                cfg_struct=params["cfg_struct"],
-                cfg_slat=params["cfg_slat"],
-                seed=seed,
-            )
-        except RuntimeError as e:
-            if "out of memory" in str(e).lower():
-                logger.warning("[GPU1] Trellis OOM; clearing cache.")
-                if self.aux_device.type == "cuda":
-                    with torch.cuda.device(self.aux_device):
-                        torch.cuda.empty_cache()
+    async def _trellis_one(self, pil_image, params: dict):
+        for attempt in (1, 2):
+            try:
+                ply_bytes = await self._run_blocking(
+                    self.trellis_img.infer_to_ply,
+                    pil_image,
+                    struct_steps=params["struct_steps"],
+                    slat_steps=params["slat_steps"],
+                    cfg_struct=params["cfg_struct"],
+                    cfg_slat=params["cfg_slat"],
+                    seed=params.get("seed"),
+                )
+                return ply_bytes, params
+            except RuntimeError as e:
+                msg = str(e).lower()
+                if ("illegal memory access" in msg) or ("device-side assert" in msg):
+                    if attempt == 1:
+                        # Allow Trellis wrapper to mark poisoned & reinit; then retry once
+                        self._log_cuda("[GPU1] Trellis illegal access; reinit & retry.", self.aux_device)
+                        continue
+                if "out of memory" in msg:
+                    self._log_cuda("[GPU1] Trellis OOM; drop this try.", self.aux_device)
+                    return b"", params
+                # Unknown runtime — return empty to keep the pipeline flowing
+                self._log_cuda(f"[GPU1] Trellis runtime error: {e}", self.aux_device)
                 return b"", params
-            logger.error(f"Trellis runtime error: {e}")
-            return b"", params
-        except Exception as e:
-            logger.error(f"Trellis error: {e}")
-            return b"", params
-        return ply_bytes, params
+        return b"", params  # both attempts failed
 
     def _within_budget(self, start_ts: float) -> bool:
         if self.time_budget_s is None:
