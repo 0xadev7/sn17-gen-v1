@@ -53,7 +53,7 @@ class FluxText2Image:
                 prompt=prompt,
                 num_inference_steps=steps,
                 guidance_scale=guidance,
-                max_sequence_length=256,
+                max_sequence_length=512,
                 generator=gen,
                 height=res,
                 width=res,
