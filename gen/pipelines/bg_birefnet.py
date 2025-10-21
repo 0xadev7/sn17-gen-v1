@@ -11,6 +11,7 @@ from gen.utils.vram import vram_guard
 class BiRefNetRemover:
     def __init__(self, device: torch.device):
         self.device = device
+        self.dtype = torch.float16 if device.type == "cuda" else torch.float32
         self.model = (
             AutoModelForImageSegmentation.from_pretrained(
                 "ZhengPeng7/BiRefNet", trust_remote_code=True
@@ -39,7 +40,7 @@ class BiRefNetRemover:
         with vram_guard():
             x = self.tfm(rgb).unsqueeze(0).to(self.device, non_blocking=True)
             if self.device.type == "cuda":
-                ctx = torch.amp.autocast(dtype=torch.float16)
+                ctx = torch.amp.autocast(device_type="cuda", dtype=self.dtype)
             else:
 
                 class _Noop:

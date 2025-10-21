@@ -7,12 +7,13 @@ from diffusers import FluxPipeline
 from PIL import Image
 
 from gen.utils.prompt import tune_prompt
+from gen.utils.vram import vram_guard
 
 
 class FluxText2Image:
     def __init__(self, device: torch.device):
         self.device = device
-        dtype = torch.bfloat16 if device.type == "cuda" else torch.float32
+        dtype = torch.float16 if device.type == "cuda" else torch.float32
 
         self.pipe = FluxPipeline.from_pretrained(
             "black-forest-labs/FLUX.1-schnell",
@@ -30,15 +31,41 @@ class FluxText2Image:
     ) -> Image.Image:
         prompt = tune_prompt(prompt)
 
-        gen = torch.Generator(device="cpu").manual_seed(seed)
-        out = self.pipe(
-            prompt=prompt,
-            num_inference_steps=steps,
-            guidance_scale=guidance,
-            max_sequence_length=256,
-            generator=gen,
-            height=res,
-            width=res,
-        )
+        with vram_guard():
+            if self.device.type == "cuda":
+                autocast_ctx = torch.amp.autocast(device_type="cuda", dtype=self.dtype)
+            else:
 
-        return out.images[0]
+                class _Noop:
+                    def __enter__(self):
+                        pass
+
+                    def __exit__(self, *a):
+                        pass
+
+                autocast_ctx = _Noop()
+
+            with autocast_ctx:
+                generator = torch.Generator(
+                    device=self.device.type if self.device.type == "cuda" else "cpu"
+                ).manual_seed(seed)
+                out = self.pipe(
+                    prompt=prompt,
+                    num_inference_steps=steps,
+                    guidance_scale=guidance,
+                    max_sequence_length=256,
+                    generator=generator,
+                    height=res,
+                    width=res,
+                )
+
+            try:
+                img = out.images[0]
+                # Return a decoupled copy so diffusers internals can be freed
+                result = img.copy()
+            finally:
+                # Be explicit: large objects often hold GPU refs
+                del out
+                img.close()
+
+            return result
