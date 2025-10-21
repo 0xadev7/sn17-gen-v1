@@ -26,9 +26,7 @@ async def lifespan(app: FastAPI):
     global STATE
     try:
         STATE = MinerState(CFG)
-        logger.info(
-            f"Server up. Port={CFG.port}, T2I_GPU={CFG.t2i_gpu_id}, AUX_GPU={CFG.aux_gpu_id}"
-        )
+        logger.info(f"Server up. Port={CFG.port}")
     except Exception as e:
         # Do NOT crash app; let /health expose failure
         STATE = None
