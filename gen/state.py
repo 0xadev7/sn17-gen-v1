@@ -9,7 +9,7 @@ import torch
 from PIL import Image
 
 from gen.settings import Config
-from gen.pipelines.t2i_flux import FluxText2Image
+from gen.pipelines.t2i_sd35 import SD35Text2Image
 from gen.pipelines.bg_birefnet import BiRefNetRemover
 from gen.pipelines.i23d_trellis import TrellisImageTo3D
 from gen.validators.external_validator import ExternalValidator
@@ -28,7 +28,7 @@ class MinerState:
             self.aux_device = torch.device("cpu")
 
         # Pipelines pinned to devices
-        self.t2i = FluxText2Image(self.t2i_device)  # GPU0
+        self.t2i = SD35Text2Image(self.t2i_device)  # GPU0
         self.bg_remover = BiRefNetRemover(self.aux_device)  # GPU1
         self.trellis_img = TrellisImageTo3D(  # GPU1
             self.aux_device,
