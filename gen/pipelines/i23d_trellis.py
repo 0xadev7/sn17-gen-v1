@@ -31,9 +31,7 @@ class TrellisImageTo3D:
 
         with vram_guard():
             if self.device.type == "cuda":
-                autocast_ctx = torch.cuda.amp.autocast(
-                    device_type="cuda", dtype=self.dtype
-                )
+                autocast_ctx = torch.autocast(device_type="cuda", dtype=self.dtype)
             else:
                 # no-op context manager
                 class _Noop:

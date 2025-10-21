@@ -47,7 +47,7 @@ class SD35Text2Image:
 
         with vram_guard():
             if self.device.type == "cuda":
-                autocast_ctx = torch.amp.autocast(device_type="cuda", dtype=self.dtype)
+                autocast_ctx = torch.autocast(device_type="cuda", dtype=self.dtype)
             else:
 
                 class _Noop:

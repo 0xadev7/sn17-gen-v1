@@ -40,7 +40,7 @@ class BiRefNetRemover:
         with vram_guard():
             x = self.tfm(rgb).unsqueeze(0).to(self.device, non_blocking=True)
             if self.device.type == "cuda":
-                ctx = torch.amp.autocast(device_type="cuda", dtype=self.dtype)
+                ctx = torch.autocast(device_type="cuda", dtype=self.dtype)
             else:
 
                 class _Noop:
