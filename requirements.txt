@@ -1,9 +1,9 @@
 xformers==0.0.27.post2
-diffusers==0.30.3
+diffusers>=0.32.0
 transformers==4.56.2
 sentencepiece
-accelerate>=0.33.0
-safetensors>=0.4.3
+accelerate>=0.34.0
+safetensors>=0.4.4
 open-clip-torch>=2.24.0
 einops
 opencv-python-headless
