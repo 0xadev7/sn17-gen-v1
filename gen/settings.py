@@ -9,13 +9,6 @@ load_dotenv()
 @dataclass
 class Config:
     port: int = int(os.getenv("PORT", 7000))
-
-    # Split GPU assignment (A40s)
-    # GPU0: Flux.Schnell + BiRefNet + (Validation GPU if your validator uses GPU0)
-    # GPU1: Trellis
-    t2i_gpu_id: int = int(os.getenv("T2I_GPU_ID", 0))
-    aux_gpu_id: int = int(os.getenv("AUX_GPU_ID", 1))
-
     timeout_s: float = float(os.getenv("TIMEOUT_S", 30.0))
 
     # Validation
@@ -31,19 +24,14 @@ class Config:
     early_stop_score: float = float(os.getenv("EARLY_STOP_SCORE", 0.82))
     time_budget_s: float | None = float(os.getenv("TIME_BUDGET_S", 22))
 
-    # Concurrency & buffering
-    queue_maxsize: int = int(os.getenv("QUEUE_MAXSIZE", 4))
-    t2i_concurrency: int = int(os.getenv("T2I_CONCURRENCY", 1))       # GPU0
-    trellis_concurrency: int = int(os.getenv("TRELLIS_CONCURRENCY", 1))# GPU1
-
     # Text-to-2D parameters
-    t2i_steps: int = int(os.getenv("T2I_STEPS", 2))
+    t2i_steps: int = int(os.getenv("T2I_STEPS", 4))
     t2i_guidance: float = float(os.getenv("T2I_GUIDANCE", 0.0))
-    t2i_res: int = int(os.getenv("T2I_RES", 896))
-    t2i_max_tries: int = int(os.getenv("T2I_MAX_TRIES", 6))
+    t2i_res: int = int(os.getenv("T2I_RES", 1024))
+    t2i_max_tries: int = int(os.getenv("T2I_MAX_TRIES", 1))
 
     # Trellis parameters
-    trellis_struct_steps: int = int(os.getenv("TRELLIS_STRUCT_STEPS", 10))
+    trellis_struct_steps: int = int(os.getenv("TRELLIS_STRUCT_STEPS", 8))
     trellis_slat_steps: int = int(os.getenv("TRELLIS_SLAT_STEPS", 10))
     trellis_cfg_struct: float = float(os.getenv("TRELLIS_CFG_STRUCT", 7.5))
     trellis_cfg_slat: float = float(os.getenv("TRELLIS_CFG_SLAT", 3.0))
