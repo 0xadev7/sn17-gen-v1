@@ -12,6 +12,7 @@ from gen.pipelines.t2i_sd35 import SD35Text2Image
 from gen.pipelines.bg_birefnet import BiRefNetRemover
 from gen.pipelines.i23d_trellis import TrellisImageTo3D
 from gen.validators.external_validator import ExternalValidator
+from gen.utils.vram import vram_guard
 
 
 class MinerState:
@@ -115,7 +116,6 @@ class MinerState:
 
     async def text_to_ply(self, prompt: str) -> Tuple[bytes, float]:
         start_ts = time.time()
-
         best_score = -1.0
         best_ply: bytes = b""
 
@@ -124,29 +124,44 @@ class MinerState:
                 logger.warning("Budget exhausted mid-T2I; stopping.")
                 break
 
-            t0 = time.time()
-            img = await self._gen_one_image(prompt, iparams)
-            t2i_sec = time.time() - t0
-            logger.debug(f"T2I: {t2i_sec:.2f}s")
+            with vram_guard():
+                t0 = time.time()
+                img = await self._gen_one_image(prompt, iparams)
+                t2i_sec = time.time() - t0
+                logger.debug(f"T2I: {t2i_sec:.2f}s")
 
             if not self._within_budget(start_ts):
                 logger.warning("Budget exhausted mid-BG Removal; stopping.")
+                # clean up
+                try:
+                    img.close()
+                except Exception:
+                    pass
+                del img
                 break
 
-            t0 = time.time()
-            fg = await self._bg_remove_one(img)
-            bg_sec = time.time() - t0
-            logger.debug(f"BG: {bg_sec:.2f}s")
+            with vram_guard():
+                t0 = time.time()
+                fg = await self._bg_remove_one(img)
+                # PIL image no longer needed
+                try:
+                    img.close()
+                except Exception:
+                    pass
+                del img
+                bg_sec = time.time() - t0
+                logger.debug(f"BG: {bg_sec:.2f}s")
 
             for tparams in self._trellis_param_sweep():
                 if not self._within_budget(start_ts):
                     logger.warning("Budget exhausted mid-Trellis; stopping.")
                     break
 
-                t0 = time.time()
-                ply_bytes = await self._trellis_one(fg, tparams)
-                trellis_sec = time.time() - t0
-                logger.debug(f"Trellis: {trellis_sec:.2f}s")
+                with vram_guard(ipc_collect=True):
+                    t0 = time.time()
+                    ply_bytes = await self._trellis_one(fg, tparams)
+                    trellis_sec = time.time() - t0
+                    logger.debug(f"Trellis: {trellis_sec:.2f}s")
 
                 if not ply_bytes:
                     continue
@@ -156,7 +171,9 @@ class MinerState:
                     break
 
                 t0 = time.time()
-                score, passed, _ = await self.validator.validate_text(prompt, ply_bytes)
+                score, passed, _ = await self.validator.validate_text(
+                    prompt, plyBytes := ply_bytes
+                )
                 validate_sec = time.time() - t0
                 logger.info(
                     f"Validate: score={score:.4f}, passed={passed}, {validate_sec:.2f}s"
@@ -169,41 +186,59 @@ class MinerState:
                     logger.info(
                         f"[text] Early-stop: score {score:.4f} >= {self.early_stop_score:.4f}"
                     )
+                    # free fg now that we’re done
+                    try:
+                        fg.close()
+                    except Exception:
+                        pass
+                    del fg
                     return (ply_bytes if passed else b""), score
+
+            # free between outer t2i sweeps
+            try:
+                fg.close()
+            except Exception:
+                pass
+            del fg
 
         final_pass = best_score >= self.cfg.vld_threshold
         return (best_ply if final_pass else b""), max(0.0, best_score)
 
     async def image_to_ply(self, image_b64) -> Tuple[bytes, float]:
-        """
-        Image mode remains sequential per image.
-        """
         start_ts = time.time()
-
         best_score = -1.0
         best_ply: bytes = b""
 
+        # decode → PIL
         try:
             raw = base64.b64decode(image_b64, validate=False)
         except Exception:
             raw = base64.b64decode(image_b64 or "")
         pil_image = Image.open(io.BytesIO(raw)).convert("RGBA")
 
-        t0 = time.time()
+        with vram_guard():
+            t0 = time.time()
+            fg, _ = self.bg_remover.remove(pil_image)
+            if self.debug_save:
+                fg.save(f"nobg_{random.randint(0, 2**31 - 1)}.png")
+            bg_sec = time.time() - t0
+            logger.debug(f"BG: {bg_sec:.2f}s")
 
-        fg, _ = self.bg_remover.remove(pil_image)
-        if self.debug_save:
-            fg.save(f"nobg_{random.randint(0, 2**31 - 1)}.png")
-
-        bg_sec = time.time() - t0
-        logger.debug(f"BG: {bg_sec:.2f}s")
+        # original is no longer needed
+        try:
+            pil_image.close()
+        except Exception:
+            pass
+        del pil_image
 
         for tparams in self._trellis_param_sweep():
             if not self._within_budget(start_ts):
                 logger.warning("Budget exhausted mid-Trellis; stopping.")
                 break
 
-            ply_bytes = await self._trellis_one(fg, tparams)
+            with vram_guard(ipc_collect=True):
+                ply_bytes = await self._trellis_one(fg, tparams)
+
             if not ply_bytes:
                 continue
 
@@ -221,7 +256,32 @@ class MinerState:
                 logger.info(
                     f"[image] Early-stop: score {score:.4f} >= {self.early_stop_score:.4f}"
                 )
+                try:
+                    fg.close()
+                except Exception:
+                    pass
+                del fg
                 return (ply_bytes if passed else b""), score
+
+        try:
+            fg.close()
+        except Exception:
+            pass
+        del fg
 
         final_pass = best_score >= self.cfg.vld_threshold
         return (best_ply if final_pass else b""), max(0.0, best_score)
+
+    def close(self):
+        # drop big refs
+        for obj in [self.t2i, self.bg_remover, self.trellis_img]:
+            try:
+                del obj
+            except Exception:
+                pass
+        import gc, torch
+
+        gc.collect()
+        if torch.cuda.is_available():
+            torch.cuda.empty_cache()
+            torch.cuda.ipc_collect()

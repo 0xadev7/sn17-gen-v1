@@ -5,6 +5,8 @@ import torch
 from torchvision import transforms
 from transformers import AutoModelForImageSegmentation
 
+from gen.utils.vram import vram_guard
+
 
 class BiRefNetRemover:
     def __init__(self, device: torch.device):
@@ -33,15 +35,38 @@ class BiRefNetRemover:
     @torch.inference_mode()
     def remove(self, img: Image.Image) -> Tuple[Image.Image, np.ndarray]:
         rgb = img.convert("RGB")
-        x = self.tfm(rgb).unsqueeze(0).to(self.device, non_blocking=True)
-        if self.device.type == "cuda":
-            x = x.half()
 
-        pred = self.model(x)[-1].sigmoid().float().cpu()[0, 0]  # HxW
-        mask_pil = transforms.functional.resize(transforms.ToPILImage()(pred), rgb.size)
+        with vram_guard():
+            x = self.tfm(rgb).unsqueeze(0).to(self.device, non_blocking=True)
+            if self.device.type == "cuda":
+                ctx = torch.cuda.amp.autocast(dtype=torch.float16)
+            else:
 
-        out = rgb.copy()
-        out.putalpha(mask_pil)
+                class _Noop:
+                    def __enter__(self):
+                        pass
 
-        alpha = np.array(mask_pil, dtype=np.float32) / 255.0
-        return out, alpha
+                    def __exit__(self, *a):
+                        pass
+
+                ctx = _Noop()
+
+            try:
+                with ctx:
+                    pred = self.model(x)[-1].sigmoid()  # (B,1,H,W) on device/float16
+                # Move once to CPU as float32; release device tensors immediately.
+                pred_cpu = pred.float().cpu()[0, 0]  # HxW, torch.float32 on CPU
+            finally:
+                # Drop GPU tensors promptly
+                del x
+                del pred
+
+            mask_pil = transforms.functional.resize(
+                transforms.ToPILImage()(pred_cpu), rgb.size
+            )
+
+            out = rgb.copy()
+            out.putalpha(mask_pil)
+
+            alpha = np.array(mask_pil, dtype=np.float32) / 255.0
+            return out, alpha
