@@ -237,7 +237,10 @@ class MinerState:
                 break
 
             with vram_guard(ipc_collect=True):
+                t0 = time.time()
                 ply_bytes = await self._trellis_one(fg, tparams)
+                trellis_sec = time.time() - t0
+                logger.debug(f"Trellis: {trellis_sec:.2f}s")
 
             if not ply_bytes:
                 continue

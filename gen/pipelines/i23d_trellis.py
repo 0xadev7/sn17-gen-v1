@@ -30,32 +30,18 @@ class TrellisImageTo3D:
     ) -> bytes:
 
         with vram_guard():
-            if self.device.type == "cuda":
-                autocast_ctx = torch.cuda.amp.autocast(dtype=self.dtype)
-            else:
-                # no-op context manager
-                class _Noop:
-                    def __enter__(self):
-                        pass
-
-                    def __exit__(self, *a):
-                        pass
-
-                autocast_ctx = _Noop()
-
-            with autocast_ctx:
-                outputs = self.pipe.run(
-                    image,
-                    seed=seed if seed is not None else 1,
-                    sparse_structure_sampler_params={
-                        "steps": struct_steps,
-                        "cfg_strength": cfg_struct,
-                    },
-                    slat_sampler_params={
-                        "steps": slat_steps,
-                        "cfg_strength": cfg_slat,
-                    },
-                )
+            outputs = self.pipe.run(
+                image,
+                seed=seed if seed is not None else 1,
+                sparse_structure_sampler_params={
+                    "steps": struct_steps,
+                    "cfg_strength": cfg_struct,
+                },
+                slat_sampler_params={
+                    "steps": slat_steps,
+                    "cfg_strength": cfg_slat,
+                },
+            )
 
             try:
                 # Force materialization on CPU, so GPU refs don’t linger.

@@ -10,10 +10,10 @@ from gen.utils.vram import vram_guard
 class SD35Text2Image:
     def __init__(self, device: torch.device):
         self.device = device
-        dtype = torch.bfloat16 if device.type == "cuda" else torch.float32
+        self.dtype = torch.bfloat16 if device.type == "cuda" else torch.float32
 
         self.pipe = StableDiffusion3Pipeline.from_pretrained(
-            "stabilityai/stable-diffusion-3.5-large-turbo", torch_dtype=dtype
+            "stabilityai/stable-diffusion-3.5-large-turbo", torch_dtype=self.dtype
         ).to(self.device)
 
         # Safer memory footprint on long-running loops
@@ -47,7 +47,7 @@ class SD35Text2Image:
 
         with vram_guard():
             if self.device.type == "cuda":
-                autocast_ctx = torch.cuda.amp.autocast(dtype=torch.bfloat16)
+                autocast_ctx = torch.amp.autocast(dtype=self.dtype)
             else:
 
                 class _Noop:
