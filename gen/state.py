@@ -355,6 +355,9 @@ class MinerState:
 
         # BG removal on GPU0
         fg, _ = self.bg_remover.remove(pil_image)
+        
+        if self.debug_save:
+            fg.save(f"nobg_{random.randint(0, 2**31 - 1)}.png")
 
         best_score = -1.0
         best_ply: bytes = b""
