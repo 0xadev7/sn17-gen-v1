@@ -1,6 +1,7 @@
 from __future__ import annotations
 import io, torch
 from typing import Optional
+from contextlib import nullcontext
 from PIL import Image
 
 from gen.lib.trellis.pipelines import TrellisImageTo3DPipeline
@@ -15,7 +16,6 @@ class TrellisImageTo3D:
         self.pipe = TrellisImageTo3DPipeline.from_pretrained(
             "microsoft/TRELLIS-image-large",
         )
-        # If Trellis supports dtype/device kwargs, prefer those; otherwise keep .to()
         self.pipe.to(self.device)
 
     @torch.inference_mode()
@@ -30,41 +30,48 @@ class TrellisImageTo3D:
     ) -> bytes:
 
         with vram_guard():
-            # if self.device.type == "cuda":
-            #     autocast_ctx = torch.autocast(device_type="cuda", dtype=self.dtype)
-            # else:
-            #     # no-op context manager
-            #     class _Noop:
-            #         def __enter__(self):
-            #             pass
+            # Optional: autocast on CUDA for memory/perf
+            # autocast_ctx = (
+            #     torch.cuda.amp.autocast(dtype=self.dtype)
+            #     if self.device.type == "cuda"
+            #     else nullcontext()
+            # )
 
-            #         def __exit__(self, *a):
-            #             pass
-
-            #     autocast_ctx = _Noop()
-
-            # with autocast_ctx:
-            outputs = self.pipe.run(
-                image,
-                seed=seed if seed is not None else 1,
-                sparse_structure_sampler_params={
-                    "steps": struct_steps,
-                    "cfg_strength": cfg_struct,
-                },
-                slat_sampler_params={
-                    "steps": slat_steps,
-                    "cfg_strength": cfg_slat,
-                },
-            )
+            outputs = None
+            gs = None
+            buf = None
+            result = None
 
             try:
-                # Force materialization on CPU, so GPU refs don’t linger.
+                # with autocast_ctx:
+                outputs = self.pipe.run(
+                    image,
+                    seed=seed if seed is not None else 1,
+                    sparse_structure_sampler_params={
+                        "steps": struct_steps,
+                        "cfg_strength": cfg_struct,
+                    },
+                    slat_sampler_params={
+                        "steps": slat_steps,
+                        "cfg_strength": cfg_slat,
+                    },
+                )
+
+                # Extract, serialize to PLY (in-memory)
                 gs = outputs["gaussian"][0]  # Trellis object
                 buf = io.BytesIO()
-                gs.save_ply(buf)  # should not require GPU after this line
+                gs.save_ply(buf)  # should no longer require GPU after this
                 result = buf.getvalue()
+
+                return result
+
             finally:
-                # Defensive cleanup of large refs
+                # Defensive cleanup: only touch objects that exist
+                try:
+                    if buf is not None:
+                        buf.close()
+                except Exception:
+                    pass
                 try:
                     del gs
                 except Exception:
@@ -73,9 +80,6 @@ class TrellisImageTo3D:
                     del outputs
                 except Exception:
                     pass
-                try:
-                    buf.close()
-                except Exception:
-                    pass
 
-            return result
+                if self.device.type == "cuda":
+                    torch.cuda.empty_cache()

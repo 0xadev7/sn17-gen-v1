@@ -1,8 +1,7 @@
 from __future__ import annotations
 from typing import Optional
-import asyncio
-import threading
 import torch
+from contextlib import nullcontext
 from diffusers import FluxPipeline
 from PIL import Image
 
@@ -13,17 +12,19 @@ from gen.utils.vram import vram_guard
 class FluxText2Image:
     def __init__(self, device: torch.device):
         self.device = device
-        dtype = torch.bfloat16 if device.type == "cuda" else torch.float32
+        self.dtype = torch.bfloat16 if device.type == "cuda" else torch.float32
 
         self.pipe = FluxPipeline.from_pretrained(
             "black-forest-labs/FLUX.1-schnell",
-            torch_dtype=dtype,
-        )
-        self.pipe.to(self.device)
+            torch_dtype=self.dtype,
+        ).to(self.device)
 
-        # (Optional) small perf wins on repeated shapes
+        # Optional perf knob
         if torch.backends.cudnn.is_available():
             torch.backends.cudnn.benchmark = True
+
+        # Optional: reduce VRAM spikes on big resolutions
+        self.pipe.enable_attention_slicing()
 
     @torch.inference_mode()
     def generate(
@@ -32,40 +33,48 @@ class FluxText2Image:
         prompt = tune_prompt(prompt)
 
         with vram_guard():
-            if self.device.type == "cuda":
-                autocast_ctx = torch.autocast(device_type="cuda", dtype=self.dtype)
-            else:
+            autocast_ctx = (
+                torch.autocast(device_type="cuda", dtype=self.dtype)
+                if self.device.type == "cuda"
+                else nullcontext()
+            )
 
-                class _Noop:
-                    def __enter__(self):
-                        pass
-
-                    def __exit__(self, *a):
-                        pass
-
-                autocast_ctx = _Noop()
-
-            with autocast_ctx:
-                generator = torch.Generator(
-                    device=self.device.type if self.device.type == "cuda" else "cpu"
-                ).manual_seed(seed)
-                out = self.pipe(
-                    prompt=prompt,
-                    num_inference_steps=steps,
-                    guidance_scale=guidance,
-                    max_sequence_length=256,
-                    generator=generator,
-                    height=res,
-                    width=res,
-                )
+            out = None
+            img = None
+            result = None
 
             try:
-                img = out.images[0]
-                # Return a decoupled copy so diffusers internals can be freed
-                result = img.copy()
-            finally:
-                # Be explicit: large objects often hold GPU refs
-                del out
-                img.close()
+                with autocast_ctx:
+                    generator = torch.Generator(
+                        device="cuda" if self.device.type == "cuda" else "cpu"
+                    ).manual_seed(seed)
 
-            return result
+                    out = self.pipe(
+                        prompt=prompt,
+                        num_inference_steps=steps,
+                        guidance_scale=guidance,
+                        max_sequence_length=256,
+                        generator=generator,
+                        height=res,
+                        width=res,
+                    )
+
+                # Safely extract & decouple from diffusers internals
+                img = out.images[0]
+                result = img.copy()
+                return result
+
+            finally:
+                # Defensive cleanup only if assigned
+                try:
+                    if img is not None:
+                        img.close()
+                except Exception:
+                    pass
+                try:
+                    del out
+                except Exception:
+                    pass
+
+                if self.device.type == "cuda":
+                    torch.cuda.empty_cache()
