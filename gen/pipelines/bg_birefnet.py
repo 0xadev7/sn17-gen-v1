@@ -12,21 +12,19 @@ from gen.utils.vram import vram_guard
 class BiRefNetRemover:
     def __init__(self, device: torch.device):
         self.device = device
-
-        # Keep model in fp16 on CUDA; stay fp32 on CPU.
-        self.dtype = torch.bfloat16 if device.type == "cuda" else torch.float32
+        # Use bf16 for autocast on CUDA, keep fp32 on CPU.
+        self.amp_dtype = torch.bfloat16 if device.type == "cuda" else torch.float32
 
         self.model = (
             AutoModelForImageSegmentation.from_pretrained(
                 "ZhengPeng7/BiRefNet", trust_remote_code=True
             )
-            .to(self.device)
+            .to(self.device, dtype=torch.float32)
             .eval()
         )
+
         if self.device.type == "cuda":
-            # Match autocast dtype
-            self.model.half()
-            # Optional: improves matmul perf on Ampere+
+            # Optional perf knob; no impact on dtype mismatch
             torch.set_float32_matmul_precision("high")
 
         self.image_size = (1024, 1024)
@@ -47,21 +45,25 @@ class BiRefNetRemover:
 
         with vram_guard():
             try:
-                x = self.tfm(rgb).unsqueeze(0).to(self.device, non_blocking=True)
+                # Keep input as fp32; autocast will downcast as needed
+                x = (
+                    self.tfm(rgb)
+                    .unsqueeze(0)
+                    .to(self.device, dtype=torch.float32, non_blocking=True)
+                )
 
-                autocast_ctx = (
-                    torch.autocast(device_type="cuda", dtype=self.dtype)
+                amp_ctx = (
+                    torch.cuda.amp.autocast(dtype=self.amp_dtype)
                     if self.device.type == "cuda"
                     else nullcontext()
                 )
 
-                with autocast_ctx:
+                with amp_ctx:
                     out = self.model(x)
-                    # Handle tuple/list/dict/tensor outputs robustly
+                    # Robustly get logits
                     if isinstance(out, (tuple, list)):
                         logits = out[-1]
                     elif isinstance(out, dict):
-                        # prefer common keys if present
                         logits = (
                             out.get("logits")
                             or out.get("out")
@@ -70,9 +72,9 @@ class BiRefNetRemover:
                     else:
                         logits = out
 
-                    pred = logits.sigmoid()  # (B,1,H,W)
+                    pred = logits.sigmoid()
 
-                pred_cpu = pred.detach().float().cpu()[0, 0]  # HxW torch.float32 on CPU
+                pred_cpu = pred.detach().float().cpu()[0, 0]
 
             finally:
                 # Drop device tensors promptly if they exist
