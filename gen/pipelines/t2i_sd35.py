@@ -10,7 +10,7 @@ from gen.utils.vram import vram_guard
 class SD35Text2Image:
     def __init__(self, device: torch.device):
         self.device = device
-        self.dtype = torch.float16 if device.type == "cuda" else torch.float32
+        self.dtype = torch.bfloat16 if device.type == "cuda" else torch.float32
 
         self.pipe = StableDiffusion3Pipeline.from_pretrained(
             "stabilityai/stable-diffusion-3.5-large-turbo", torch_dtype=self.dtype

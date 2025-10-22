@@ -13,7 +13,7 @@ from gen.utils.vram import vram_guard
 class FluxText2Image:
     def __init__(self, device: torch.device):
         self.device = device
-        dtype = torch.float16 if device.type == "cuda" else torch.float32
+        dtype = torch.bfloat16 if device.type == "cuda" else torch.float32
 
         self.pipe = FluxPipeline.from_pretrained(
             "black-forest-labs/FLUX.1-schnell",
