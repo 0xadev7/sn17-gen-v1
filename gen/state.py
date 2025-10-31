@@ -164,6 +164,7 @@ class MinerState:
                     logger.debug(f"Trellis: {trellis_sec:.2f}s")
 
                 if not ply_bytes:
+                    fg.save(f"out/error_{random.randint(0, 2**31 - 1)}.png")
                     continue
 
                 if not self._within_budget(start_ts):
@@ -178,6 +179,9 @@ class MinerState:
                 logger.info(
                     f"Validate: score={score:.4f}, passed={passed}, {validate_sec:.2f}s"
                 )
+
+                if not passed:
+                    fg.save(f"out/error_{random.randint(0, 2**31 - 1)}.png")
 
                 if score > best_score:
                     best_score, best_ply = score, ply_bytes
@@ -243,6 +247,7 @@ class MinerState:
                 logger.debug(f"Trellis: {trellis_sec:.2f}s")
 
             if not ply_bytes:
+                fg.save(f"out/error_{random.randint(0, 2**31 - 1)}.png")
                 continue
 
             t0 = time.time()
@@ -251,6 +256,9 @@ class MinerState:
             logger.info(
                 f"Validate: score={score:.4f}, passed={passed}, {validate_sec:.2f}s"
             )
+
+            if not passed:
+                fg.save(f"out/error_{random.randint(0, 2**31 - 1)}.png")
 
             if score > best_score:
                 best_score, best_ply = score, ply_bytes
