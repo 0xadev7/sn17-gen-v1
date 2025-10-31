@@ -4,7 +4,7 @@ from contextlib import nullcontext
 import torch
 from diffusers import StableDiffusion3Pipeline
 from PIL import Image
-from gen.utils.prompt import tune_prompt
+from gen.utils.prompt import refactor_prompt
 from gen.utils.vram import vram_guard
 
 
@@ -35,7 +35,7 @@ class SD35Text2Image:
     def generate(
         self, prompt: str, steps: int, guidance: float, res: int, seed: int = 0
     ) -> Image.Image:
-        prompt = tune_prompt(prompt)
+        prompt_out = refactor_prompt(prompt)
 
         # Keep sizes divisible by 16 for safety with SD3.5
         width = (int(res) // 16) * 16
@@ -57,7 +57,8 @@ class SD35Text2Image:
             try:
                 with autocast_ctx:
                     out = self.pipe(
-                        prompt=prompt,
+                        prompt=prompt_out.rewritten_prompt,
+                        negative_prompt=prompt_out.negative_prompt,
                         num_inference_steps=int(steps),
                         guidance_scale=float(guidance or 0.0),
                         width=width,
