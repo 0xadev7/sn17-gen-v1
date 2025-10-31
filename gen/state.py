@@ -166,7 +166,9 @@ class MinerState:
                     logger.debug(f"Trellis: {trellis_sec:.2f}s")
 
                 if not ply_bytes:
-                    fg.save(f"out/error_{prompt.replace(' ', '_')}.png")
+                    fg.save(
+                        f"out/error_{prompt.replace(' ', '_')}_{iparams['seed']}.png"
+                    )
                     continue
 
                 if not self._within_budget(start_ts):
@@ -181,7 +183,9 @@ class MinerState:
                 )
 
                 if not passed:
-                    fg.save(f"out/error_{prompt.replace(' ', '_')}.png")
+                    fg.save(
+                        f"out/error_{prompt.replace(' ', '_')}_{iparams['seed']}.png"
+                    )
 
                 if score > best_score:
                     best_score, best_ply = score, ply_bytes
