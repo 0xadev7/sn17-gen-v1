@@ -8,6 +8,7 @@ import torch
 from PIL import Image
 
 from gen.settings import Config
+from gen.pipelines.i2i_sd35 import SD35Image2Image
 from gen.pipelines.t2i_sd35 import SD35Text2Image
 from gen.pipelines.bg_birefnet import BiRefNetRemover
 from gen.pipelines.i23d_trellis import TrellisImageTo3D
@@ -26,6 +27,7 @@ class MinerState:
 
         # Pipelines pinned to devices
         self.t2i = SD35Text2Image(self.device)
+        self.i2i = SD35Image2Image(self.device)
         self.bg_remover = BiRefNetRemover(self.device)
         self.trellis_img = TrellisImageTo3D(self.device)
 
@@ -172,9 +174,7 @@ class MinerState:
                     break
 
                 t0 = time.time()
-                score, passed, _ = await self.validator.validate_text(
-                    prompt, plyBytes := ply_bytes
-                )
+                score, passed, _ = await self.validator.validate_text(prompt, ply_bytes)
                 validate_sec = time.time() - t0
                 logger.info(
                     f"Validate: score={score:.4f}, passed={passed}, {validate_sec:.2f}s"
@@ -220,65 +220,97 @@ class MinerState:
             raw = base64.b64decode(image_b64 or "")
         pil_image = Image.open(io.BytesIO(raw)).convert("RGBA")
 
-        with vram_guard():
-            t0 = time.time()
-            fg, _ = self.bg_remover.remove(pil_image)
-            if self.debug_save:
-                fg.save(f"nobg_{random.randint(0, 2**31 - 1)}.png")
-            bg_sec = time.time() - t0
-            logger.debug(f"BG: {bg_sec:.2f}s")
-
-        # original is no longer needed
-        try:
-            pil_image.close()
-        except Exception:
-            pass
-        del pil_image
-
-        for tparams in self._trellis_param_sweep():
+        for iparams in self._t2i_param_sweep():
             if not self._within_budget(start_ts):
-                logger.warning("Budget exhausted mid-Trellis; stopping.")
+                logger.warning("Budget exhausted mid-I2I; stopping.")
                 break
 
-            with vram_guard(ipc_collect=True):
+            with vram_guard():
                 t0 = time.time()
-                ply_bytes = await self._trellis_one(fg, tparams)
-                trellis_sec = time.time() - t0
-                logger.debug(f"Trellis: {trellis_sec:.2f}s")
-
-            if not ply_bytes:
-                fg.save(f"out/error_{random.randint(0, 2**31 - 1)}.png")
-                continue
-
-            t0 = time.time()
-            score, passed, _ = await self.validator.validate_image(image_b64, ply_bytes)
-            validate_sec = time.time() - t0
-            logger.info(
-                f"Validate: score={score:.4f}, passed={passed}, {validate_sec:.2f}s"
-            )
-
-            if not passed:
-                fg.save(f"out/error_{random.randint(0, 2**31 - 1)}.png")
-
-            if score > best_score:
-                best_score, best_ply = score, ply_bytes
-
-            if score >= self.early_stop_score:
-                logger.info(
-                    f"[image] Early-stop: score {score:.4f} >= {self.early_stop_score:.4f}"
+                img = await self.i2i.generate(
+                    pil_image,
+                    steps=iparams["steps"],
+                    guidance=iparams["guidance"],
+                    res=iparams["res"],
+                    seed=iparams["seed"],
                 )
+                i2i_sec = time.time() - t0
+                logger.debug(f"I2I: {i2i_sec:.2f}s")
+
+            if not self._within_budget(start_ts):
+                logger.warning("Budget exhausted mid-BG Removal; stopping.")
+                # clean up
                 try:
-                    fg.close()
+                    img.close()
                 except Exception:
                     pass
-                del fg
-                return (ply_bytes if passed else b""), score
+                del img
+                break
 
-        try:
-            fg.close()
-        except Exception:
-            pass
-        del fg
+            with vram_guard():
+                t0 = time.time()
+                fg = await self._bg_remove_one(img)
+                # PIL image no longer needed
+                try:
+                    img.close()
+                except Exception:
+                    pass
+                del img
+                bg_sec = time.time() - t0
+                logger.debug(f"BG: {bg_sec:.2f}s")
+
+            for tparams in self._trellis_param_sweep():
+                if not self._within_budget(start_ts):
+                    logger.warning("Budget exhausted mid-Trellis; stopping.")
+                    break
+
+                with vram_guard(ipc_collect=True):
+                    t0 = time.time()
+                    ply_bytes = await self._trellis_one(fg, tparams)
+                    trellis_sec = time.time() - t0
+                    logger.debug(f"Trellis: {trellis_sec:.2f}s")
+
+                if not ply_bytes:
+                    fg.save(f"out/error_{random.randint(0, 2**31 - 1)}.png")
+                    continue
+
+                if not self._within_budget(start_ts):
+                    logger.warning("Budget exhausted mid-Validation; stopping.")
+                    break
+
+                t0 = time.time()
+                score, passed, _ = await self.validator.validate_image(
+                    image_b64, ply_bytes
+                )
+                validate_sec = time.time() - t0
+                logger.info(
+                    f"Validate: score={score:.4f}, passed={passed}, {validate_sec:.2f}s"
+                )
+
+                if not passed:
+                    fg.save(f"out/error_{random.randint(0, 2**31 - 1)}.png")
+
+                if score > best_score:
+                    best_score, best_ply = score, ply_bytes
+
+                if score >= self.early_stop_score:
+                    logger.info(
+                        f"[text] Early-stop: score {score:.4f} >= {self.early_stop_score:.4f}"
+                    )
+                    # free fg now that we’re done
+                    try:
+                        fg.close()
+                    except Exception:
+                        pass
+                    del fg
+                    return (ply_bytes if passed else b""), score
+
+            # free between outer t2i sweeps
+            try:
+                fg.close()
+            except Exception:
+                pass
+            del fg
 
         final_pass = best_score >= self.cfg.vld_threshold
         return (best_ply if final_pass else b""), max(0.0, best_score)
