@@ -27,7 +27,7 @@ class MinerState:
 
         # Pipelines pinned to devices
         self.t2i = SD35Text2Image(self.device)
-        self.i2i = SD35Image2Image(self.device)
+        # self.i2i = SD35Image2Image(self.device)
         self.bg_remover = BiRefNetRemover(self.device)
         self.trellis_img = TrellisImageTo3D(self.device)
 
@@ -227,13 +227,14 @@ class MinerState:
 
             with vram_guard():
                 t0 = time.time()
-                img = await self.i2i.generate(
-                    pil_image,
-                    steps=iparams["steps"],
-                    guidance=iparams["guidance"],
-                    res=iparams["res"],
-                    seed=iparams["seed"],
-                )
+                # img = await self.i2i.generate(
+                #     pil_image,
+                #     steps=iparams["steps"],
+                #     guidance=iparams["guidance"],
+                #     res=iparams["res"],
+                #     seed=iparams["seed"],
+                # )
+                img = pil_image
                 i2i_sec = time.time() - t0
                 logger.debug(f"I2I: {i2i_sec:.2f}s")
 
